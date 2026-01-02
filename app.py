@@ -185,3 +185,51 @@ with tab2:
 
             st.success(f"Imported {imported} new Strava rides.")
             st.rerun()
+
+with tab3:
+    st.subheader("Plan import (CSV)")
+    st.write("Upload a CSV with columns: week_start (Monday, YYYY-MM-DD), planned_km, planned_hours, phase, notes.")
+
+    uploaded = st.file_uploader("Upload plan CSV", type=["csv"], key="plan_csv_uploader")
+    if uploaded is not None:
+        try:
+            df = parse_plan_csv(uploaded)
+            st.success(f"Loaded {len(df)} plan rows.")
+            st.dataframe(df, use_container_width=True)
+
+            if st.button("Save plan to patient", key="save_plan_btn"):
+                for _, row in df.iterrows():
+                    upsert_week_plan(
+                        pid,
+                        row["week_start"].isoformat(),
+                        float(row["planned_km"]) if "planned_km" in df.columns and pd.notna(row.get("planned_km")) else None,
+                        float(row["planned_hours"]) if "planned_hours" in df.columns and pd.notna(row.get("planned_hours")) else None,
+                        str(row["phase"]) if "phase" in df.columns and pd.notna(row.get("phase")) else None,
+                        str(row["notes"]) if "notes" in df.columns and pd.notna(row.get("notes")) else None,
+                    )
+                st.success("Plan saved.")
+        except Exception as e:
+            st.error(f"Plan import error: {e}")
+
+    st.divider()
+    st.subheader("Manual plan edit (single week)")
+    week_start = st.date_input("Week start (Monday)", value=to_monday(date.today()), key="manual_week_start")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        planned_km = st.number_input("Planned km", min_value=0.0, step=10.0, key="manual_planned_km")
+    with col2:
+        planned_hours = st.number_input("Planned hours", min_value=0.0, step=1.0, key="manual_planned_hours")
+    with col3:
+        phase = st.text_input("Phase (e.g., Base/Build/Peak/Deload/Event)", key="manual_phase")
+    note = st.text_area("Notes", height=80, key="manual_note")
+
+    if st.button("Save this week", key="save_week_btn"):
+        upsert_week_plan(
+            pid,
+            week_start.isoformat(),
+            planned_km,
+            planned_hours,
+            phase.strip() if phase else None,
+            note.strip() if note else None,
+        )
+        st.success("Week saved to plan.")
