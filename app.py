@@ -18,6 +18,12 @@ from db_store import (
     mark_activity_synced,
     # Strength DB status (optional/admin)
     count_norm_rows,
+    list_exercises,
+    list_rep_schemes,
+    get_norm_standard,
+    upsert_patient_profile,
+    get_patient_profile,
+    insert_strength_test,
 )
 
 from plan import parse_plan_csv, rides_to_weekly_summary, to_monday
