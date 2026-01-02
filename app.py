@@ -186,6 +186,29 @@ with tab2:
             st.success(f"Imported {imported} new Strava rides.")
             st.rerun()
 
+    # -----------------------------
+    # PLAN VS ACTUAL (WEEKLY)
+    # -----------------------------
+
+    # Pull rides
+    rides = fetch_rides(pid)
+    rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
+
+    # Pull plan
+    plan_rows = fetch_week_plans(pid)
+    plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
+
+    if not plan_df.empty:
+        # Ensure week_start is a normalized datetime so merges work reliably
+        plan_df["week_start"] = pd.to_datetime(plan_df["week_start"]).dt.normalize()
+
+    weekly_actual = rides_to_weekly_summary(rides_df)
+
+    # If your rides_to_weekly_summary already outputs week_start as datetime, this is optional,
+    # but it makes merges bulletproof if any time component sneaks in.
+    if not weekly_actual.empty:
+        weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"]).dt.normalize()
+
 with tab3:
     st.subheader("Plan import (CSV)")
     st.write("Upload a CSV with columns: week_start (Monday, YYYY-MM-DD), planned_km, planned_hours, phase, notes.")
@@ -208,6 +231,7 @@ with tab3:
                         str(row["notes"]) if "notes" in df.columns and pd.notna(row.get("notes")) else None,
                     )
                 st.success("Plan saved.")
+                st.rerun()
         except Exception as e:
             st.error(f"Plan import error: {e}")
 
