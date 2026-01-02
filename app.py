@@ -107,17 +107,30 @@ with tab2:
             st.warning("Strava callback state did not match the selected patient. Please try again.")
             st.query_params.clear()
 
-    token_row = get_strava_tokens(pid)
+        token_row = get_strava_tokens(pid)
 
     if token_row is None:
         st.link_button("Connect Strava", build_auth_url(state=str(pid)))
         st.caption("Connect Strava to automatically import rides into the log.")
     else:
         access_token, refresh_token, expires_at, athlete_id, scope, refreshed = ensure_fresh_token(token_row)
-        if refreshed:
-            save_strava_tokens(pid, access_token, refresh_token, expires_at, athlete_id, str(scope))
 
-                days_back = st.number_input("Sync how many days back?", min_value=1, max_value=365, value=30)
+        if refreshed:
+            save_strava_tokens(
+                pid,
+                access_token,
+                refresh_token,
+                expires_at,
+                athlete_id,
+                str(scope),
+            )
+
+        days_back = st.number_input(
+            "Sync how many days back?",
+            min_value=1,
+            max_value=365,
+            value=30
+        )
 
         if st.button("Sync Strava rides"):
             after_epoch = int(time.time() - int(days_back) * 86400)
@@ -137,7 +150,13 @@ with tab2:
 
                 for a in acts:
                     sport = a.get("sport_type") or a.get("type")
-                    if sport not in ["Ride", "VirtualRide", "EBikeRide", "GravelRide", "MountainBikeRide"]:
+                    if sport not in [
+                        "Ride",
+                        "VirtualRide",
+                        "EBikeRide",
+                        "GravelRide",
+                        "MountainBikeRide"
+                    ]:
                         continue
 
                     act_id = int(a["id"])
