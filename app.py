@@ -185,6 +185,15 @@ with tab2:
 
             st.success(f"Imported {imported} new Strava rides.")
             st.rerun()
+            
+# --- DEBUG: confirm we can see the plan in tab2 ---
+plan_rows = fetch_week_plans(pid)
+st.info(f"[DEBUG] pid={pid} ({selected}) plan_rows={len(plan_rows)}")
+if plan_rows:
+    st.dataframe(
+        pd.DataFrame(plan_rows, columns=["week_start","planned_km","planned_hours","phase","notes"]).head(10),
+        use_container_width=True
+    )
 
     # -----------------------------
     # PLAN VS ACTUAL (WEEKLY)
@@ -198,16 +207,43 @@ with tab2:
     plan_rows = fetch_week_plans(pid)
     plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
 
+    # Normalise plan week_start
     if not plan_df.empty:
-        # Ensure week_start is a normalized datetime so merges work reliably
-        plan_df["week_start"] = pd.to_datetime(plan_df["week_start"]).dt.normalize()
+        plan_df["week_start"] = pd.to_datetime(plan_df["week_start"], errors="coerce").dt.normalize()
 
+    # Weekly actual
     weekly_actual = rides_to_weekly_summary(rides_df)
 
-    # If your rides_to_weekly_summary already outputs week_start as datetime, this is optional,
-    # but it makes merges bulletproof if any time component sneaks in.
+    # Normalise actual week_start (even if empty / object)
     if not weekly_actual.empty:
-        weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"]).dt.normalize()
+        weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"], errors="coerce").dt.normalize()
+    else:
+        weekly_actual = pd.DataFrame(columns=["week_start","actual_km","actual_hours","rides_count"])
+        weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"])
+
+    # Merge
+    if plan_df.empty and weekly_actual.empty:
+        st.info("No plan or rides yet. Add rides or import a plan on the Plan tab.")
+    else:
+        if plan_df.empty:
+            merged = weekly_actual.copy()
+        elif weekly_actual.empty:
+            merged = plan_df.copy()
+        else:
+            merged = pd.merge(plan_df, weekly_actual, on="week_start", how="outer").sort_values("week_start")
+
+        # Fill NA
+        for c in ["planned_km","planned_hours","actual_km","actual_hours","rides_count"]:
+            if c in merged.columns:
+                merged[c] = merged[c].fillna(0)
+
+        # Variance
+        if "planned_km" in merged.columns and "actual_km" in merged.columns:
+            merged["km_variance"] = merged["actual_km"] - merged["planned_km"]
+        if "planned_hours" in merged.columns and "actual_hours" in merged.columns:
+            merged["hours_variance"] = merged["actual_hours"] - merged["planned_hours"]
+
+        st.dataframe(merged, use_container_width=True)
 
 with tab3:
     st.subheader("Plan import (CSV)")
@@ -230,7 +266,16 @@ with tab3:
                         str(row["phase"]) if "phase" in df.columns and pd.notna(row.get("phase")) else None,
                         str(row["notes"]) if "notes" in df.columns and pd.notna(row.get("notes")) else None,
                     )
+                    
                 st.success("Plan saved.")
+                
+                saved_rows = fetch_week_plans(pid)
+                st.info(f"Saved plan rows for pid={pid} ({selected}): {len(saved_rows)}")
+                st.dataframe(
+                    pd.DataFrame(saved_rows, columns=["week_start","planned_km","planned_hours","phase","notes"]).head(10),
+                    use_container_width=True
+                )
+                
                 st.rerun()
         except Exception as e:
             st.error(f"Plan import error: {e}")
