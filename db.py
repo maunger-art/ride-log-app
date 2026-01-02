@@ -76,3 +76,4 @@ def is_activity_synced(patient_id: int, activity_id: int) -> bool:
     ok = cur.fetchone() is not None
     conn.close()
     return ok
+    
