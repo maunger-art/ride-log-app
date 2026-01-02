@@ -117,7 +117,7 @@ with tab2:
         if refreshed:
             save_strava_tokens(pid, access_token, refresh_token, expires_at, athlete_id, str(scope))
 
-        days_back = st.number_input("Sync how many days back?", min_value=1, max_value=365, value=30)
+                days_back = st.number_input("Sync how many days back?", min_value=1, max_value=365, value=30)
 
         if st.button("Sync Strava rides"):
             after_epoch = int(time.time() - int(days_back) * 86400)
@@ -125,7 +125,13 @@ with tab2:
             page = 1
 
             while True:
-                acts = list_activities(access_token, after_epoch=after_epoch, per_page=50, page=page)
+                acts = list_activities(
+                    access_token,
+                    after_epoch=after_epoch,
+                    per_page=50,
+                    page=page
+                )
+
                 if not acts:
                     break
 
@@ -138,4 +144,24 @@ with tab2:
                     if is_activity_synced(pid, act_id):
                         continue
 
-                    ride_date = a["start_date_local"][:]()_
+                    ride_date = a["start_date_local"][:10]  # YYYY-MM-DD
+                    distance_km = float(a.get("distance", 0)) / 1000.0
+                    duration_min = int(round(float(a.get("elapsed_time", 0)) / 60.0))
+                    name = a.get("name", "Strava ride")
+
+                    add_ride(
+                        pid,
+                        ride_date,
+                        distance_km,
+                        duration_min,
+                        None,
+                        f"[Strava] {name}"
+                    )
+
+                    mark_activity_synced(pid, act_id)
+                    imported += 1
+
+                page += 1
+
+            st.success(f"Imported {imported} new Strava rides.")
+            st.rerun()
