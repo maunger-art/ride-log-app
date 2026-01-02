@@ -76,7 +76,7 @@ else:
 # -------------------------------------------------------------------
 # Tabs
 # -------------------------------------------------------------------
-tab1, tab2, tab3 = st.tabs(["Log Ride", "Dashboard", "Plan Import / Edit"])
+tab1, tab2, tab3, tab4 = st.tabs(["Log Ride", "Dashboard", "Plan Import / Edit", "S&C Planning"])
 
 # -------------------------------------------------------------------
 # TAB 1: Log Ride
