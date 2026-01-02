@@ -107,7 +107,8 @@ with tab2:
             st.warning("Strava callback state did not match the selected patient. Please try again.")
             st.query_params.clear()
 
-        token_row = get_strava_tokens(pid)
+    # IMPORTANT: this must be OUTSIDE the callback block
+    token_row = get_strava_tokens(pid)
 
     if token_row is None:
         st.link_button("Connect Strava", build_auth_url(state=str(pid)))
