@@ -40,6 +40,15 @@ from db_store import (
     estimate_unilateral_from_bilateral,
     upsert_strength_estimate,
     get_strength_estimate,
+
+    # S&C programming (6-week blocks)
+    create_sc_block,
+    upsert_sc_week,
+    upsert_sc_session,
+    clear_sc_session_exercises,
+    add_sc_session_exercise,
+    fetch_latest_sc_block,
+    fetch_sc_block_detail,
 )
 
 from plan import parse_plan_csv, rides_to_weekly_summary, to_monday
