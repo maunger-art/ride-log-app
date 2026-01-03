@@ -15,7 +15,7 @@ from typing import Optional
 
 from supabase import Client, create_client
 
-from config import SUPABASE_URL, SUPABASE_KEY
+from config import SUPABASE_URL, SUPABASE_KEY, APP_MODE
 from plan import parse_plan_csv, rides_to_weekly_summary, to_monday
 from strava import build_auth_url, exchange_code_for_token, ensure_fresh_token, list_activities
 
@@ -151,6 +151,9 @@ def get_supabase_client() -> Client:
 
 def require_authenticated_user() -> dict:
     if not SUPABASE_URL or not SUPABASE_KEY:
+        if APP_MODE == "production":
+            st.error("Supabase configuration missing. Set SUPABASE_URL and SUPABASE_KEY.")
+            st.stop()
         st.warning("Supabase configuration missing. Running in local auth mode.")
         if "auth_user" not in st.session_state:
             st.title("Local sign in")
