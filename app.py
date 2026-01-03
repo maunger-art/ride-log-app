@@ -1,4 +1,13 @@
 import streamlit as st
+
+st.set_page_config(
+    page_title="Technique | Performance & Rehab",
+    page_icon="assets/technique_favicon.png",
+    layout="wide",
+)
+
+st.sidebar.image("assets/technique_logo_full.png", use_column_width=True)
+
 import pandas as pd
 import time
 from datetime import date, datetime, timedelta
