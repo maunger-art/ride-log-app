@@ -9,10 +9,18 @@ from db_store import (
 def seed():
     init_db()
 
-    # Avoid duplicating seed if already populated
-    if count_norm_rows() > 0:
-        print("Seed skipped: norm_strength_standards already contains rows.")
-        return
+    # -----------------------------
+    # Always seed exercises + rep schemes (safe/idempotent)
+    # -----------------------------
+
+    # --- Xmas / template exercises needed by Tab 4 block generator ---
+    upsert_exercise("Bike Erg (High Seat)", "conditioning", "bilateral", "machine", "aerobic", "Store reps as minutes (MVP).")
+    upsert_exercise("Wall Sit", "squat", "bilateral", "bodyweight", "quads", "Isometric hold; reps stored as seconds.")
+    upsert_exercise("Isometric Single-Leg Hamstring Bridge", "hinge", "unilateral", "bodyweight", "hamstrings/glutes", "Isometric; reps=seconds.")
+    upsert_exercise("Isometric Split Squat", "squat", "unilateral", "kettlebell", "quads/glutes", "Isometric; load optional.")
+    upsert_exercise("Side Plank", "core", "unilateral", "bodyweight", "obliques", "Reps=seconds.")
+    upsert_exercise("Hip Abduction (Band, Seated)", "hip", "bilateral", "band", "glute med", "Reps=count.")
+    upsert_exercise("Single-Leg RDL", "hinge", "unilateral", "dumbbell", "hamstrings/glutes", "Reps=count.")
 
     # -----------------------------
     # Exercises (initial library)
@@ -65,6 +73,8 @@ def seed():
 
     # -----------------------------
     # Rep schemes by goal (MVP)
+    # (Insert-only is fine for v1; duplicates are unlikely unless you run seed repeatedly)
+    # If you want strict de-dupe later, we can add a UNIQUE index and upsert logic.
     # -----------------------------
     upsert_rep_scheme("endurance", "base", 12, 20, 2, 4, 0.55, 0.70, 5, 7, 45, 90, "Controlled; continuous tension")
     upsert_rep_scheme("hypertrophy", "base", 8, 12, 3, 5, 0.65, 0.80, 6, 8, 60, 120, "Controlled eccentric; crisp concentric")
@@ -72,10 +82,13 @@ def seed():
     upsert_rep_scheme("power", "peak", 2, 5, 3, 6, 0.30, 0.60, 5, 7, 90, 180, "Explosive concentric; stop before speed drops")
 
     # -----------------------------
-    # Normative standards (relative to BW)
-    # metric="rel_1rm_bw" for lifts; "pullup_reps" for pull-ups
-    # endurance-athlete oriented thresholds (not PL elite norms)
+    # Normative standards
+    # Only seed norms if empty (avoid duplicating)
     # -----------------------------
+    if count_norm_rows() > 0:
+        print("Seed: exercises/rep_schemes ensured. Norms already exist, skipping norm inserts.")
+        return
+
     SRC = "Internal endurance-athlete benchmarks (v1) – Technique/Benchmark PS"
 
     def add_age_bands(ex_id, sex, metric, p, f, g, e, source, notes=None):
@@ -100,10 +113,8 @@ def seed():
     add_age_bands(ohp_id,   "male", "rel_1rm_bw", 0.30, 0.50, 0.70, 0.90, SRC)
     add_age_bands(hip_thrust_id, "male", "rel_1rm_bw", 0.90, 1.10, 1.40, 1.70, SRC, "Useful substitute if deadlift tolerance limited.")
 
-    # Pull-ups as reps (single broad band; your lookup uses age bands, so we add all)
     add_age_bands(pullup_id, "male", "pullup_reps", 2, 5, 10, 15, SRC)
 
-    # Unilateral male (per-leg *relative* targets; pragmatic)
     add_age_bands(bss_id,    "male", "rel_1rm_bw", 0.60, 0.80, 1.00, 1.20, SRC)
     add_age_bands(sl_rdl_id, "male", "rel_1rm_bw", 0.40, 0.60, 0.80, 1.00, SRC)
     add_age_bands(stepup_id, "male", "rel_1rm_bw", 0.40, 0.60, 0.80, 1.00, SRC)
@@ -119,7 +130,6 @@ def seed():
 
     add_age_bands(pullup_id, "female", "pullup_reps", 0, 3, 6, 10, SRC)
 
-    # Unilateral female (per-leg *relative* targets)
     add_age_bands(bss_id,    "female", "rel_1rm_bw", 0.40, 0.50, 0.65, 0.80, SRC)
     add_age_bands(sl_rdl_id, "female", "rel_1rm_bw", 0.30, 0.50, 0.60, 0.80, SRC)
     add_age_bands(stepup_id, "female", "rel_1rm_bw", 0.30, 0.40, 0.50, 0.70, SRC)
