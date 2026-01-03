@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 from datetime import date, datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional
 
 from db_store import (
     init_db,
@@ -33,7 +33,6 @@ from db_store import (
     list_exercises,
     list_rep_schemes,
     count_norm_rows,
-    get_exercise,
 
     # strength estimation
     estimate_e1rm_kg_for_exercise,
@@ -41,26 +40,22 @@ from db_store import (
     upsert_strength_estimate,
     get_strength_estimate,
 
-    # S&C programming engine
+    # S&C programming
     create_sc_block,
-    fetch_latest_sc_block,
     upsert_sc_week,
     upsert_sc_session,
-    upsert_sc_session_template,
-    clear_sc_template_exercises,
-    add_sc_template_exercise,
-    list_sc_session_templates,
-    list_sc_template_exercises,
-    upsert_sc_week_target,
-    set_sc_week_actuals,
-    fetch_sc_week_targets_for_block,
-    generate_sc_targets_for_template_row,
+    clear_sc_session_exercises,
+    add_sc_session_exercise,
+    fetch_latest_sc_block,
+    fetch_sc_block_detail,
+    update_sc_session_exercise_actual,
 )
 
 from plan import parse_plan_csv, rides_to_weekly_summary, to_monday
 from strava import build_auth_url, exchange_code_for_token, ensure_fresh_token, list_activities
 
-# Optional: seed strength DB via sidebar button (safe to omit if file not present)
+
+# Optional: seed DB via sidebar button (safe to omit if file not present)
 try:
     from seed_strength_standards import seed as seed_strength_db
 except Exception:
@@ -70,6 +65,13 @@ except Exception:
 # -----------------------------
 # Helpers
 # -----------------------------
+def _metric_for_exercise_name(name: str) -> str:
+    n = (name or "").lower()
+    if n.startswith("pull-up") or n.startswith("pullup"):
+        return "pullup_reps"
+    return "rel_1rm_bw"
+
+
 def _age_from_dob_or_manual(dob_str: str, manual_age: int) -> int:
     if dob_str and dob_str.strip():
         try:
@@ -81,130 +83,21 @@ def _age_from_dob_or_manual(dob_str: str, manual_age: int) -> int:
     return int(manual_age)
 
 
-def _metric_for_exercise_name(name: str) -> str:
-    n = (name or "").lower()
-    if n.startswith("pull-up") or n.startswith("pullup") or "pull-up" in n or "pullup" in n:
-        return "pullup_reps"
-    return "rel_1rm_bw"
+def _week_start_from_date(d: date) -> date:
+    return d - timedelta(days=d.weekday())
 
 
-def _to_iso(d: date) -> str:
-    return d.isoformat()
-
-
-def _default_monday(d: date) -> date:
-    return to_monday(d)
-
-
-def _ensure_block_weeks_sessions(block_id: int, start_date_iso: str, weeks: int, deload_week: int, sessions_per_week: int) -> None:
-    """
-    Creates/updates sc_weeks + sc_sessions for the block.
-    Session labels: A, B, C (up to 3 supported by UI; you can extend).
-    """
-    start_dt = datetime.strptime(start_date_iso, "%Y-%m-%d").date()
-    labels = ["A", "B", "C"][: max(1, min(int(sessions_per_week), 3))]
-
-    for wk in range(1, int(weeks) + 1):
-        wk_start = start_dt + timedelta(days=7 * (wk - 1))
-        deload_flag = (wk == int(deload_week))
-        focus = "deload" if deload_flag else None
-        week_id = upsert_sc_week(
-            block_id=block_id,
-            week_no=wk,
-            week_start=wk_start.isoformat(),
-            focus=focus,
-            deload_flag=deload_flag,
-            notes=None,
-        )
-        for lab in labels:
-            upsert_sc_session(week_id=week_id, session_label=lab, day_hint=None, notes=None)
-
-
-def _init_template_state() -> None:
-    if "sc_template_rows" not in st.session_state:
-        # block_id -> session_label -> list[dict]
-        st.session_state["sc_template_rows"] = {}
-
-
-def _get_template_rows(block_id: int, session_label: str) -> List[Dict[str, Any]]:
-    _init_template_state()
-    bkey = str(block_id)
-    if bkey not in st.session_state["sc_template_rows"]:
-        st.session_state["sc_template_rows"][bkey] = {}
-    if session_label not in st.session_state["sc_template_rows"][bkey]:
-        st.session_state["sc_template_rows"][bkey][session_label] = []
-    return st.session_state["sc_template_rows"][bkey][session_label]
-
-
-def _set_template_rows(block_id: int, session_label: str, rows: List[Dict[str, Any]]) -> None:
-    _init_template_state()
-    bkey = str(block_id)
-    if bkey not in st.session_state["sc_template_rows"]:
-        st.session_state["sc_template_rows"][bkey] = {}
-    st.session_state["sc_template_rows"][bkey][session_label] = rows
-
-
-def _load_templates_from_db(block_id: int) -> None:
-    """
-    Pull existing templates + rows from DB into session_state (once).
-    """
-    _init_template_state()
-    bkey = str(block_id)
-    if st.session_state["sc_template_rows"].get(bkey):
-        return  # already loaded for this block
-
-    st.session_state["sc_template_rows"][bkey] = {}
-    templates = list_sc_session_templates(block_id)
-    for tid, session_label, title, notes in templates:
-        rows = list_sc_template_exercises(tid)
-        out_rows = []
-        for r in rows:
-            (
-                te_id, sort_order, group_key, group_order,
-                exercise_id, ex_name, implement,
-                mode, sets,
-                reps_start, reps_step, reps_cap,
-                time_start_sec, time_step_sec, time_cap_sec,
-                pct_1rm_start, pct_1rm_step, pct_1rm_cap,
-                load_increment_kg,
-                rpe_target, rest_sec, intent, te_notes
-            ) = r
-            out_rows.append({
-                "sort_order": int(sort_order or 0),
-                "group_key": group_key,
-                "group_order": None if group_order is None else int(group_order),
-                "exercise_id": int(exercise_id),
-                "exercise_name": ex_name,
-                "mode": mode or "reps",
-                "sets": int(sets or 3),
-                "reps_start": None if reps_start is None else int(reps_start),
-                "reps_step": int(reps_step or 2),
-                "reps_cap": None if reps_cap is None else int(reps_cap),
-                "time_start_sec": None if time_start_sec is None else int(time_start_sec),
-                "time_step_sec": int(time_step_sec or 10),
-                "time_cap_sec": None if time_cap_sec is None else int(time_cap_sec),
-                "pct_1rm_start": None if pct_1rm_start is None else float(pct_1rm_start),
-                "pct_1rm_step": float(pct_1rm_step or 0.0),
-                "pct_1rm_cap": None if pct_1rm_cap is None else float(pct_1rm_cap),
-                "load_increment_kg": float(load_increment_kg or 2.5),
-                "rpe_target": None if rpe_target is None else int(rpe_target),
-                "rest_sec": None if rest_sec is None else int(rest_sec),
-                "intent": intent,
-                "notes": te_notes,
-            })
-        st.session_state["sc_template_rows"][bkey][session_label] = sorted(out_rows, key=lambda x: x["sort_order"])
+def _session_labels(n: int):
+    return ["A", "B", "C"][:max(1, min(3, n))]
 
 
 # -----------------------------
-# App setup
+# Streamlit setup
 # -----------------------------
 st.set_page_config(page_title="Ride Log – Plan vs Actual", layout="wide")
-
-# Initialize DB schema
 init_db()
 
 st.title("Ride Log – Plan vs Actual")
-
 
 # -------------------------------------------------------------------
 # Sidebar: Patient selection / creation
@@ -224,11 +117,9 @@ if selected == "(New patient)":
 else:
     pid = [p[0] for p in patients if p[1] == selected][0]
 
-# Guard: must have a patient selected
 if pid is None:
     st.warning("Please create or select a patient in the sidebar before using the app.")
     st.stop()
-
 
 # -------------------------------------------------------------------
 # Sidebar: Admin (optional)
@@ -241,14 +132,14 @@ if seed_strength_db is not None:
     if st.sidebar.button("Seed strength DB"):
         seed_strength_db()
         st.sidebar.success("Seed complete (or already seeded).")
+        st.rerun()
 else:
     st.sidebar.caption("Seed tool not available (seed_strength_standards.py not found).")
-
 
 # -------------------------------------------------------------------
 # Tabs
 # -------------------------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["Log Ride", "Dashboard", "Plan Import / Edit", "S&C Programming"])
+tab1, tab2, tab3, tab4 = st.tabs(["Log Ride", "Dashboard", "Plan Import / Edit", "S&C Planning"])
 
 
 # -------------------------------------------------------------------
@@ -283,7 +174,7 @@ with tab1:
     st.subheader("Recent rides")
     rides = fetch_rides(pid)
     rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
-    st.dataframe(rides_df, use_container_width=True)
+    st.dataframe(rides_df, width="stretch")
 
 
 # -------------------------------------------------------------------
@@ -325,7 +216,6 @@ with tab2:
         st.caption("Connect Strava to automatically import rides into the log.")
     else:
         access_token, refresh_token, expires_at, athlete_id, scope, refreshed = ensure_fresh_token(token_row)
-
         if refreshed:
             save_strava_tokens(pid, access_token, refresh_token, expires_at, athlete_id, str(scope))
 
@@ -350,7 +240,7 @@ with tab2:
                     if is_activity_synced(pid, act_id):
                         continue
 
-                    ride_date_str = a["start_date_local"][:10]  # YYYY-MM-DD
+                    ride_date_str = a["start_date_local"][:10]
                     distance_km_val = float(a.get("distance", 0)) / 1000.0
                     duration_min_val = int(round(float(a.get("elapsed_time", 0)) / 60.0))
                     name = a.get("name", "Strava ride")
@@ -406,31 +296,7 @@ with tab2:
         if "planned_hours" in merged.columns and "actual_hours" in merged.columns:
             merged["hours_variance"] = merged["actual_hours"] - merged["planned_hours"]
 
-        st.dataframe(merged, use_container_width=True)
-
-        st.divider()
-        st.subheader("Export for coaching review")
-        csv = rides_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download rides CSV", data=csv, file_name=f"{selected}_rides.csv", mime="text/csv")
-
-        st.subheader("Copy/paste prompt for ChatGPT weekly review")
-        prompt = f"""You are my cycling coach. Review my last 4 weeks of training versus plan.
-
-Patient: {selected}
-Today: {date.today().isoformat()}
-
-Weekly Plan vs Actual (most recent):
-{merged.tail(8).to_string(index=False)}
-
-Rides (most recent 25):
-{rides_df.head(25).to_string(index=False)}
-
-Please provide:
-1) adherence summary (hours/km),
-2) fatigue/risk flags,
-3) suggested adjustments for next 2 weeks,
-4) key coaching points."""
-        st.code(prompt, language="text")
+        st.dataframe(merged, width="stretch")
 
 
 # -------------------------------------------------------------------
@@ -438,14 +304,14 @@ Please provide:
 # -------------------------------------------------------------------
 with tab3:
     st.subheader("Plan import (CSV)")
-    st.write("Upload a CSV with columns: week_start (Monday, YYYY-MM-DD), planned_km, planned_hours, phase, notes.")
+    st.write("Upload CSV columns: week_start (Monday, YYYY-MM-DD), planned_km, planned_hours, phase, notes.")
 
     uploaded = st.file_uploader("Upload plan CSV", type=["csv"], key="plan_csv_uploader")
     if uploaded is not None:
         try:
             df = parse_plan_csv(uploaded)
             st.success(f"Loaded {len(df)} plan rows.")
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
 
             if st.button("Save plan to patient", key="save_plan_btn"):
                 for _, row in df.iterrows():
@@ -457,7 +323,6 @@ with tab3:
                         str(row["phase"]) if "phase" in df.columns and pd.notna(row.get("phase")) else None,
                         str(row["notes"]) if "notes" in df.columns and pd.notna(row.get("notes")) else None,
                     )
-
                 st.success("Plan saved.")
                 st.rerun()
 
@@ -466,7 +331,7 @@ with tab3:
 
     st.divider()
     st.subheader("Manual plan edit (single week)")
-    week_start = st.date_input("Week start (Monday)", value=_default_monday(date.today()), key="manual_week_start")
+    week_start = st.date_input("Week start (Monday)", value=to_monday(date.today()), key="manual_week_start")
     col1, col2, col3 = st.columns(3)
     with col1:
         planned_km = st.number_input("Planned km", min_value=0.0, step=10.0, key="manual_planned_km")
@@ -490,23 +355,22 @@ with tab3:
 
 
 # -------------------------------------------------------------------
-# TAB 4: S&C Programming (Blocks + Linear Progression + Actual Tracking)
+# TAB 4: S&C Planning
 # -------------------------------------------------------------------
 with tab4:
-    st.subheader("S&C Programming (Blocks + Linear Progression)")
+    st.subheader("S&C Planning")
 
     st.caption(f"Strength standards rows: {count_norm_rows()}")
     if count_norm_rows() == 0:
         st.warning(
             "Strength standards are not seeded yet. "
-            "Add seed_strength_standards.py to the repo root and run 'Seed strength DB' from the sidebar."
+            "Add seed_strength_standards.py to repo root and run 'Seed strength DB' from sidebar."
         )
-        st.stop()
 
     st.divider()
 
     # -----------------------------
-    # Patient profile (drives auto-estimates)
+    # Patient profile
     # -----------------------------
     st.subheader("Patient profile (drives auto-estimates)")
 
@@ -526,30 +390,22 @@ with tab4:
             "Sex",
             options=["", "male", "female"],
             index=(["", "male", "female"].index(sex_default) if sex_default in ["male", "female"] else 0),
-            key="profile_sex_tab4",
+            key="profile_sex",
         )
     with colp2:
-        dob = st.text_input(
-            "DOB (YYYY-MM-DD) – optional",
-            value=(dob_default if dob_default else ""),
-            help="Leave blank if you do not want DOB stored; use Age below instead.",
-            key="profile_dob_tab4",
-        )
+        dob = st.text_input("DOB (YYYY-MM-DD) – optional", value=dob_default or "", key="profile_dob")
     with colp3:
         bodyweight_kg = st.number_input(
-            "Bodyweight (kg)",
-            min_value=0.0,
-            step=0.1,
+            "Bodyweight (kg)", min_value=0.0, step=0.1,
             value=(float(bw_default) if bw_default is not None else 0.0),
-            key="profile_bw_tab4",
+            key="profile_bw",
         )
     with colp4:
         presumed_level = st.selectbox(
             "Presumed strength level",
             options=level_options,
             index=level_options.index(level_default),
-            help="Used to estimate starting e1RM from your seeded norms (no 1RM input required).",
-            key="profile_level_tab4",
+            key="profile_level",
         )
 
     if st.button("Save profile", key="save_profile_tab4"):
@@ -569,489 +425,388 @@ with tab4:
 
     st.divider()
 
-    # Age (manual fallback)
+    # -----------------------------
+    # Age handling
+    # -----------------------------
     st.subheader("Age (for selecting the correct norm band)")
-    age_manual = st.number_input(
-        "Age (years) – used if DOB blank/invalid",
-        min_value=18,
-        max_value=65,
-        value=35,
-        key="age_manual_tab4",
-    )
+    age_manual = st.number_input("Age (years) – used if DOB blank/invalid", min_value=18, max_value=65, value=35)
     age_years = _age_from_dob_or_manual(dob, int(age_manual))
     bw_use = float(bodyweight_kg) if (bodyweight_kg and bodyweight_kg > 0) else None
+
     st.caption(f"Age used for norms: {age_years} years | Level used: {presumed_level}")
 
     st.divider()
 
-    # -----------------------------
-    # Block builder
-    # -----------------------------
+    # =========================================================
+    # 1RM Predictor (RESTORED) + Save estimate + Unilateral preview
+    # =========================================================
+    st.subheader("1RM predictor (auto)")
+
+    exercises = list_exercises()
+    if not exercises:
+        st.warning("No exercises found. Seed the DB first.")
+        st.stop()
+
+    ex_name_map = {row[1]: row[0] for row in exercises}
+    ex_names = sorted(list(ex_name_map.keys()))
+
+    selected_ex_pred = st.selectbox("Select exercise for e1RM estimate", options=ex_names, key="e1rm_ex_select")
+    ex_id_pred = ex_name_map[selected_ex_pred]
+    metric_pred = _metric_for_exercise_name(selected_ex_pred)
+
+    if metric_pred == "pullup_reps":
+        st.info("Pull-ups are prescribed via reps/sets and intent (no 1RM estimate).")
+    else:
+        if bw_use is None:
+            st.warning("Enter bodyweight to enable e1RM estimation.")
+        else:
+            est = estimate_e1rm_kg_for_exercise(
+                patient_sex=sex,
+                patient_age=int(age_years),
+                patient_bw_kg=bw_use,
+                presumed_level=presumed_level,
+                exercise_id=int(ex_id_pred),
+                metric="rel_1rm_bw",
+            )
+
+            if est.get("estimated_1rm_kg") is None:
+                st.warning(est.get("notes") or "Could not estimate e1RM.")
+            else:
+                st.metric("Estimated 1RM (auto)", f"{float(est['estimated_1rm_kg']):.1f} kg")
+                st.caption(
+                    f"Rel strength used: {float(est['estimated_rel_1rm_bw']):.2f} × BW | "
+                    f"Age band: {est.get('band_used')} | Method: {est.get('method')}"
+                )
+
+                col_est1, col_est2 = st.columns(2)
+                with col_est1:
+                    if st.button("Save estimate", key="save_estimate_btn_tab4"):
+                        upsert_strength_estimate(
+                            patient_id=pid,
+                            exercise_id=int(ex_id_pred),
+                            as_of_date=date.today().isoformat(),
+                            estimated_1rm_kg=float(est["estimated_1rm_kg"]),
+                            estimated_rel_1rm_bw=float(est["estimated_rel_1rm_bw"]),
+                            level_used=presumed_level,
+                            sex_used=sex,
+                            age_used=int(age_years),
+                            bw_used=bw_use,
+                            method=est["method"],
+                            notes=est["notes"],
+                        )
+                        st.success("Estimate saved.")
+                        st.rerun()
+
+                with col_est2:
+                    saved = get_strength_estimate(pid, int(ex_id_pred))
+                    if saved is not None:
+                        as_of_date, e1rm_kg, rel_bw, *_ = saved
+                        if e1rm_kg is not None:
+                            st.caption(f"Saved: {as_of_date} | {float(e1rm_kg):.1f} kg ({float(rel_bw):.2f}×BW)")
+
+    st.divider()
+    st.subheader("Unilateral anchor preview (Option A)")
+
+    uni_choice = st.selectbox(
+        "Unilateral movement to preview",
+        options=["(none)", "Bulgarian Split Squat (from Squat)", "Step-Up (from Squat)", "Single-Leg RDL (from Deadlift)"],
+        key="uni_preview_choice",
+    )
+
+    def _get_parent_e1rm(parent_name: str) -> Optional[float]:
+        parent_id = ex_name_map.get(parent_name)
+        if not parent_id or bw_use is None:
+            return None
+        parent_est = estimate_e1rm_kg_for_exercise(
+            patient_sex=sex,
+            patient_age=int(age_years),
+            patient_bw_kg=bw_use,
+            presumed_level=presumed_level,
+            exercise_id=int(parent_id),
+            metric="rel_1rm_bw",
+        )
+        return parent_est.get("estimated_1rm_kg")
+
+    if uni_choice != "(none)":
+        if bw_use is None:
+            st.warning("Enter bodyweight to preview unilateral estimates.")
+        else:
+            if "Bulgarian" in uni_choice or "Step-Up" in uni_choice:
+                parent_e1rm = _get_parent_e1rm("Back Squat")
+                movement_key = "bss" if "Bulgarian" in uni_choice else "stepup"
+                if parent_e1rm is None:
+                    st.warning("Could not estimate parent lift (Back Squat). Ensure it exists in Exercises.")
+                else:
+                    uni_e1rm_eq = estimate_unilateral_from_bilateral(parent_e1rm, movement_key, presumed_level)
+                    st.metric("Unilateral e1RM-equivalent (per leg)", f"{uni_e1rm_eq:.1f} kg")
+            else:
+                parent_e1rm = _get_parent_e1rm("Deadlift")
+                if parent_e1rm is None:
+                    st.warning("Could not estimate parent lift (Deadlift). Ensure it exists in Exercises.")
+                else:
+                    uni_e1rm_eq = estimate_unilateral_from_bilateral(parent_e1rm, "sl_rdl", presumed_level)
+                    st.metric("Unilateral e1RM-equivalent (per leg)", f"{uni_e1rm_eq:.1f} kg")
+
+    st.divider()
+
+    # =========================================================
+    # Rep scheme tool (RESTORED)
+    # =========================================================
+    st.subheader("Rep scheme tool (endurance / hypertrophy / strength / power)")
+
+    goal_tool = st.selectbox("Adaptation goal", options=["endurance", "hypertrophy", "strength", "power"], index=0, key="rep_scheme_goal_tool")
+    schemes = list_rep_schemes(goal_tool)
+
+    if not schemes:
+        st.warning("No rep schemes found for this goal. Seed rep schemes first.")
+    else:
+        s = schemes[0]
+        _, s_goal, s_phase, reps_min, reps_max, sets_min, sets_max, pct_min, pct_max, rpe_min, rpe_max, rest_min, rest_max, intent = s
+
+        st.markdown(f"**Scheme:** {s_goal} ({s_phase if s_phase else 'default'})")
+        st.write(f"- Sets: **{sets_min}–{sets_max}**")
+        st.write(f"- Reps: **{reps_min}–{reps_max}**")
+        if pct_min is not None and pct_max is not None:
+            st.write(f"- %1RM: **{int(pct_min*100)}–{int(pct_max*100)}%**")
+        else:
+            st.write("- %1RM: **n/a**")
+        if rest_min and rest_max:
+            st.write(f"- Rest: **{rest_min}–{rest_max} sec**")
+        if intent:
+            st.write(f"- Intent: **{intent}**")
+        if rpe_min and rpe_max:
+            st.write(f"- RPE target: **{rpe_min}–{rpe_max}**")
+
+        if metric_pred == "pullup_reps":
+            st.info("Pull-ups: prescribe via reps/sets + intent (no %1RM load range).")
+        else:
+            if bw_use is None:
+                st.info("Enter bodyweight to compute a working-load range from %1RM.")
+            else:
+                est2 = estimate_e1rm_kg_for_exercise(
+                    patient_sex=sex,
+                    patient_age=int(age_years),
+                    patient_bw_kg=bw_use,
+                    presumed_level=presumed_level,
+                    exercise_id=int(ex_id_pred),
+                    metric="rel_1rm_bw",
+                )
+                e1rm_val = est2.get("estimated_1rm_kg")
+                if e1rm_val is None or pct_min is None or pct_max is None:
+                    st.info("Missing e1RM estimate or %1RM range. Ensure BW is set and norms exist.")
+                else:
+                    cap_max = 0.70 if goal_tool == "strength" else 0.75
+                    pct_min_safe = float(pct_min)
+                    pct_max_safe = min(float(pct_max), cap_max)
+                    w_min = float(e1rm_val) * pct_min_safe
+                    w_max = float(e1rm_val) * pct_max_safe
+                    st.info(f"Suggested working load range (capped): **{w_min:.1f}–{w_max:.1f} kg**")
+
+    st.divider()
+
+    # =========================================================
+    # S&C Blocks (new engine): selectable length + hybrid suggestions + actual tracking
+    # =========================================================
     st.subheader("Create / manage S&C blocks")
 
     latest = fetch_latest_sc_block(pid)
     if latest:
-        st.caption(
-            f"Latest block: id={latest[0]} | start={latest[1]} | weeks={latest[2]} | "
-            f"model={latest[3]} | deload_week={latest[4]} | sessions/week={latest[5]} | goal={latest[6] or ''}"
-        )
-    else:
-        st.caption("No S&C block found for this patient yet.")
+        st.caption(f"Latest block: id={latest[0]} | start={latest[1]} | weeks={latest[2]} | deload_week={latest[4]} | sessions/wk={latest[5]} | goal={latest[6]}")
 
-    colb1, colb2, colb3, colb4, colb5 = st.columns(5)
+    colb1, colb2, colb3, colb4 = st.columns(4)
     with colb1:
-        start_date = st.date_input("Block start (Mon)", value=_default_monday(date.today()), key="sc_block_start")
+        block_start = st.date_input("Block start (Mon recommended)", value=_week_start_from_date(date.today()), key="block_start")
     with colb2:
-        weeks = st.selectbox("Length (weeks)", options=[4, 6, 8], index=1, key="sc_block_weeks")
+        block_weeks = st.selectbox("Block length (weeks)", options=[4, 6, 8], index=1, key="block_weeks")
     with colb3:
-        deload_week = st.number_input("Deload week", min_value=1, max_value=int(weeks), value=min(4, int(weeks)), key="sc_block_deload")
+        deload_week = st.selectbox("Deload week", options=list(range(1, block_weeks + 1)), index=min(3, block_weeks - 1), key="deload_week")
     with colb4:
-        sessions_per_week = st.selectbox("Sessions/week", options=[1, 2, 3], index=1, key="sc_block_spw")
-    with colb5:
-        goal = st.selectbox("Goal", options=["hybrid", "endurance", "hypertrophy", "strength", "power"], index=0, key="sc_block_goal")
+        sessions_per_week = st.selectbox("Sessions per week", options=[1, 2, 3], index=1, key="sessions_per_week")
 
-    block_notes = st.text_area("Block notes (optional)", height=80, key="sc_block_notes")
+    block_goal = st.selectbox("Block goal", options=["hybrid", "endurance", "hypertrophy", "strength", "power"], index=0, key="block_goal")
+    block_notes = st.text_area("Block notes", height=80, key="block_notes")
 
-    if st.button("Create new block", key="create_sc_block_btn"):
+    st.caption(
+        "Default progression rules:\n"
+        "- Isometrics/bodyweight: increase time/reps linearly\n"
+        "- DB/KB: increase reps first, then load\n"
+        "- Barbell: increase load within rep range\n"
+        "All targets are editable after generation."
+    )
+
+    # Template: Mark Xmas Session 1 (2 sessions/week A+B)
+    # We keep it neutral: clinician can edit afterwards.
+    template_A = [
+        ("Bike Erg (High Seat)", "conditioning", "minutes", {"sets": 1, "reps": 5}),
+        ("Wall Sit", "iso", "seconds", {"sets": 3, "reps": 40}),
+        ("Isometric Single-Leg Hamstring Bridge", "iso", "seconds", {"sets": 3, "reps": 30}),
+        ("Bike Erg (High Seat)", "conditioning", "minutes", {"sets": 1, "reps": 3}),
+        ("Isometric Split Squat", "kb_iso", "seconds", {"sets": 3, "reps": 30, "load_kg": 5.0}),
+        ("Side Plank", "iso", "seconds", {"sets": 3, "reps": 30}),
+    ]
+    template_B = [
+        ("Bike Erg (High Seat)", "conditioning", "minutes", {"sets": 1, "reps": 3}),
+        ("Hip Abduction (Band, Seated)", "band", "reps", {"sets": 3, "reps": 10}),
+        ("Single-Leg RDL", "db", "reps", {"sets": 3, "reps": 10, "load_kg": 5.0}),
+        ("Bike Erg (High Seat)", "conditioning", "minutes", {"sets": 1, "reps": 10}),
+    ]
+
+    # Map exercise name to id
+    name_to_id = {r[1]: r[0] for r in exercises}
+
+    def _progress_value(base: float, week_no: int, deload: bool, kind: str):
+        """
+        Linear suggestion:
+          - deload: drop ~20%
+          - otherwise: +5% per week for timed/reps; for loads small step
+        """
+        if deload:
+            return base * 0.80
+
+        if kind in ["seconds", "minutes", "reps"]:
+            # +5% per week (from week1 baseline)
+            return base * (1.0 + 0.05 * max(0, week_no - 1))
+
+        # load
+        return base * (1.0 + 0.025 * max(0, week_no - 1))
+
+    def _round_load(x: float) -> float:
+        # simple 0.5kg rounding for DB/KB
+        return round(x * 2.0) / 2.0
+
+    if st.button("Generate new block", key="gen_block_btn"):
+        # Create block
         block_id = create_sc_block(
             patient_id=pid,
-            start_date=start_date.isoformat(),
-            goal=goal,
+            start_date=block_start.isoformat(),
+            goal=block_goal,
             notes=block_notes.strip() if block_notes else None,
-            weeks=int(weeks),
+            weeks=int(block_weeks),
             model="hybrid_v1",
             deload_week=int(deload_week),
             sessions_per_week=int(sessions_per_week),
         )
-        _ensure_block_weeks_sessions(block_id, start_date.isoformat(), int(weeks), int(deload_week), int(sessions_per_week))
 
-        # Ensure session templates exist for labels
-        labels = ["A", "B", "C"][: max(1, min(int(sessions_per_week), 3))]
-        for lab in labels:
-            upsert_sc_session_template(block_id, lab, title=f"Session {lab}", notes=None)
+        # Create weeks + sessions + planned exercises
+        for w in range(1, int(block_weeks) + 1):
+            wk_start = (block_start + timedelta(days=7 * (w - 1))).isoformat()
+            is_deload = (w == int(deload_week))
 
-        st.success(f"Block created (id={block_id}).")
-        st.rerun()
+            # Focus label (simple)
+            focus = "deload" if is_deload else ("capacity" if w <= 2 else "hybrid")
 
-    st.divider()
+            week_id = upsert_sc_week(block_id, w, wk_start, focus, is_deload, None)
 
-    # Select which block to work on (for now: latest only)
-    active = fetch_latest_sc_block(pid)
-    if not active:
-        st.info("Create a block to begin S&C programming.")
-        st.stop()
+            labels = _session_labels(int(sessions_per_week))
+            for lab in labels:
+                sid = upsert_sc_session(week_id, lab, None, None)
+                clear_sc_session_exercises(sid)
 
-    block_id = int(active[0])
-    block_start_iso = str(active[1])
-    block_weeks = int(active[2])
-    block_model = str(active[3])
-    block_deload_week = int(active[4])
-    block_spw = int(active[5])
-    block_goal = active[6] or "hybrid"
+                # Choose template per label
+                tmpl = template_A if lab == "A" else template_B if lab == "B" else template_A
 
-    # Load templates into memory
-    _load_templates_from_db(block_id)
+                for ex_name, ex_type, unit, base in tmpl:
+                    ex_id = name_to_id.get(ex_name)
+                    if not ex_id:
+                        # skip if not in DB
+                        continue
 
-    # -----------------------------
-    # Template editor (Session A/B)
-    # -----------------------------
-    st.subheader("Session templates (define once; targets generated week-to-week)")
+                    sets = int(base.get("sets", 3))
+                    base_reps = float(base.get("reps", 10))
+                    reps_suggest = int(round(_progress_value(base_reps, w, is_deload, unit)))
 
-    ex_rows = list_exercises()
-    if not ex_rows:
-        st.warning("No exercises found. Seed the DB (exercises + norms) first.")
-        st.stop()
+                    # Load logic
+                    load = base.get("load_kg")
+                    if load is not None:
+                        load_suggest = _round_load(_progress_value(float(load), w, is_deload, "load"))
+                    else:
+                        load_suggest = None
 
-    ex_name_map = {r[1]: int(r[0]) for r in ex_rows}
-    ex_names = sorted(list(ex_name_map.keys()))
+                    # pct_1rm: only for barbell/DB strength templates; this block is mostly iso + light DB
+                    pct_1rm = None
 
-    labels = ["A", "B", "C"][: max(1, min(int(block_spw), 3))]
-    template_label = st.selectbox("Select template session", options=labels, key="sc_template_label")
-
-    # Current template rows
-    t_rows = _get_template_rows(block_id, template_label)
-
-    st.caption("Add rows below. Default progression rules apply when you generate week targets (editable afterwards).")
-
-    cola, colb = st.columns([2, 1])
-    with cola:
-        ex_sel = st.selectbox("Exercise", options=ex_names, key="sc_add_ex")
-    with colb:
-        mode = st.selectbox("Mode", options=["reps", "time"], index=0, key="sc_add_mode")
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        sets = st.number_input("Sets", min_value=1, max_value=10, value=3, step=1, key="sc_add_sets")
-    with col2:
-        group_key = st.text_input("Superset group (optional)", value="", key="sc_add_group")
-    with col3:
-        group_order = st.number_input("Group order (optional)", min_value=0, max_value=9, value=0, step=1, key="sc_add_group_order")
-    with col4:
-        sort_order = st.number_input("Row order", min_value=1, max_value=50, value=(len(t_rows) + 1), step=1, key="sc_add_sort")
-
-    if mode == "reps":
-        colr1, colr2, colr3 = st.columns(3)
-        with colr1:
-            reps_start = st.number_input("Reps start", min_value=1, max_value=50, value=8, step=1, key="sc_add_reps_start")
-        with colr2:
-            reps_step = st.number_input("Reps step/week", min_value=0, max_value=10, value=2, step=1, key="sc_add_reps_step")
-        with colr3:
-            reps_cap = st.number_input("Reps cap (0 = none)", min_value=0, max_value=100, value=12, step=1, key="sc_add_reps_cap")
-        time_start_sec = None
-        time_step_sec = 10
-        time_cap_sec = None
-    else:
-        colt1, colt2, colt3 = st.columns(3)
-        with colt1:
-            time_start_sec = st.number_input("Time start (sec)", min_value=5, max_value=600, value=30, step=5, key="sc_add_time_start")
-        with colt2:
-            time_step_sec = st.number_input("Time step/week (sec)", min_value=0, max_value=120, value=10, step=5, key="sc_add_time_step")
-        with colt3:
-            time_cap_sec = st.number_input("Time cap (sec, 0 = none)", min_value=0, max_value=2000, value=60, step=10, key="sc_add_time_cap")
-        reps_start = None
-        reps_step = 2
-        reps_cap = None
-
-    colp1, colp2, colp3, colp4 = st.columns(4)
-    with colp1:
-        pct_start = st.number_input("%1RM start (0 = none)", min_value=0.0, max_value=1.0, value=0.0, step=0.05, key="sc_add_pct_start")
-    with colp2:
-        pct_step = st.number_input("%1RM step/week", min_value=0.0, max_value=0.20, value=0.00, step=0.01, key="sc_add_pct_step")
-    with colp3:
-        pct_cap = st.number_input("%1RM cap (0 = none)", min_value=0.0, max_value=1.0, value=0.0, step=0.05, key="sc_add_pct_cap")
-    with colp4:
-        load_inc = st.number_input("Load increment (kg)", min_value=0.5, max_value=20.0, value=2.5, step=0.5, key="sc_add_load_inc")
-
-    colq1, colq2, colq3 = st.columns(3)
-    with colq1:
-        rpe_target = st.number_input("RPE target (0 = none)", min_value=0, max_value=10, value=7, step=1, key="sc_add_rpe")
-    with colq2:
-        rest_sec = st.number_input("Rest (sec, 0 = none)", min_value=0, max_value=600, value=90, step=15, key="sc_add_rest")
-    with colq3:
-        intent = st.text_input("Intent (optional)", value="", key="sc_add_intent")
-
-    row_notes = st.text_input("Row notes (optional)", value="", key="sc_add_notes")
-
-    if st.button("Add row to template", key="sc_add_row_btn"):
-        ex_id = ex_name_map[ex_sel]
-        t_rows.append({
-            "sort_order": int(sort_order),
-            "group_key": group_key.strip() if group_key else None,
-            "group_order": int(group_order) if group_order and int(group_order) > 0 else None,
-            "exercise_id": int(ex_id),
-            "exercise_name": ex_sel,
-            "mode": mode,
-            "sets": int(sets),
-            "reps_start": None if reps_start is None else int(reps_start),
-            "reps_step": int(reps_step),
-            "reps_cap": None if (mode == "reps" and int(reps_cap) == 0) else (int(reps_cap) if mode == "reps" else None),
-            "time_start_sec": None if time_start_sec is None else int(time_start_sec),
-            "time_step_sec": int(time_step_sec),
-            "time_cap_sec": None if (mode == "time" and int(time_cap_sec or 0) == 0) else (int(time_cap_sec) if mode == "time" else None),
-            "pct_1rm_start": None if float(pct_start) == 0.0 else float(pct_start),
-            "pct_1rm_step": float(pct_step),
-            "pct_1rm_cap": None if float(pct_cap) == 0.0 else float(pct_cap),
-            "load_increment_kg": float(load_inc),
-            "rpe_target": None if int(rpe_target) == 0 else int(rpe_target),
-            "rest_sec": None if int(rest_sec) == 0 else int(rest_sec),
-            "intent": intent.strip() if intent else None,
-            "notes": row_notes.strip() if row_notes else None,
-        })
-        t_rows = sorted(t_rows, key=lambda x: x["sort_order"])
-        _set_template_rows(block_id, template_label, t_rows)
-        st.success("Row added to template (in-memory). Click 'Save template to DB' to persist.")
-        st.rerun()
-
-    if t_rows:
-        st.write("Current template rows:")
-        t_df = pd.DataFrame([{
-            "order": r["sort_order"],
-            "group": r["group_key"],
-            "g_order": r["group_order"],
-            "exercise": r["exercise_name"],
-            "mode": r["mode"],
-            "sets": r["sets"],
-            "reps_start": r["reps_start"],
-            "reps_step": r["reps_step"],
-            "reps_cap": r["reps_cap"],
-            "time_start": r["time_start_sec"],
-            "time_step": r["time_step_sec"],
-            "time_cap": r["time_cap_sec"],
-            "pct_start": r["pct_1rm_start"],
-            "pct_step": r["pct_1rm_step"],
-            "pct_cap": r["pct_1rm_cap"],
-            "load_inc": r["load_increment_kg"],
-            "rpe": r["rpe_target"],
-            "rest": r["rest_sec"],
-            "intent": r["intent"],
-            "notes": r["notes"],
-        } for r in t_rows])
-        st.dataframe(t_df, use_container_width=True)
-
-        colsave, colclear = st.columns(2)
-        with colsave:
-            if st.button("Save template to DB", key="sc_save_template_db_btn"):
-                template_id = upsert_sc_session_template(block_id, template_label, title=f"Session {template_label}", notes=None)
-                clear_sc_template_exercises(template_id)
-                for r in t_rows:
-                    add_sc_template_exercise(
-                        template_id=template_id,
-                        exercise_id=int(r["exercise_id"]),
-                        sort_order=int(r["sort_order"]),
-                        group_key=r.get("group_key"),
-                        group_order=r.get("group_order"),
-                        mode=r.get("mode") or "reps",
-                        sets=int(r.get("sets") or 3),
-                        reps_start=r.get("reps_start"),
-                        reps_step=int(r.get("reps_step") or 2),
-                        reps_cap=r.get("reps_cap"),
-                        time_start_sec=r.get("time_start_sec"),
-                        time_step_sec=int(r.get("time_step_sec") or 10),
-                        time_cap_sec=r.get("time_cap_sec"),
-                        pct_1rm_start=r.get("pct_1rm_start"),
-                        pct_1rm_step=float(r.get("pct_1rm_step") or 0.0),
-                        pct_1rm_cap=r.get("pct_1rm_cap"),
-                        load_increment_kg=float(r.get("load_increment_kg") or 2.5),
-                        rpe_target=r.get("rpe_target"),
-                        rest_sec=r.get("rest_sec"),
-                        intent=r.get("intent"),
-                        notes=r.get("notes"),
+                    add_sc_session_exercise(
+                        session_id=sid,
+                        exercise_id=int(ex_id),
+                        sets=sets,
+                        reps=reps_suggest,
+                        pct_1rm=pct_1rm,
+                        load_kg=load_suggest,
+                        rpe_target=None,
+                        rest_sec=None,
+                        intent="Controlled; stop if form breaks" if not is_deload else "Easy / recovery intent",
+                        notes=f"Unit={unit}",
                     )
-                st.success("Template saved to DB.")
-                st.rerun()
 
-        with colclear:
-            if st.button("Clear template (in-memory)", key="sc_clear_template_mem_btn"):
-                _set_template_rows(block_id, template_label, [])
-                st.success("Template cleared in memory. (DB unchanged until you save.)")
-                st.rerun()
-    else:
-        st.info("No rows in this template yet. Add at least one exercise row.")
+        st.success(f"Block generated (id={block_id}).")
+        st.rerun()
 
     st.divider()
+    st.subheader("View / edit latest block (planned + actual)")
 
-    # -----------------------------
-    # Generate week targets (auto-suggest) from templates
-    # -----------------------------
-    st.subheader("Generate week targets (auto-suggest linear progressions)")
+    latest = fetch_latest_sc_block(pid)
+    if not latest:
+        st.info("No S&C blocks yet. Generate one above.")
+        st.stop()
 
-    st.caption(
-        "This creates planned targets for each week based on your template rows. "
-        "You can edit planned targets later in the table and track actuals."
-    )
+    block_id = int(latest[0])
+    detail = fetch_sc_block_detail(block_id)
 
-    if st.button("Generate / refresh targets for this block", key="sc_generate_targets_btn"):
-        # Ensure templates exist in DB before generating
-        templates = list_sc_session_templates(block_id)
-        if not templates:
-            st.error("No templates found for this block. Save at least one session template to DB first.")
-            st.stop()
+    if not detail:
+        st.info("Block exists but has no sessions. Re-generate or check DB.")
+        st.stop()
 
-        # Compute e1RM per exercise as needed (cached per exercise_id)
-        e1rm_cache: Dict[int, Optional[float]] = {}
+    # Render each session with editable planned + actual fields
+    for (week_id, week_no, week_start, focus, deload_flag, session_id, label, day_hint, exs) in detail:
+        with st.expander(f"Week {week_no} ({week_start}) | {focus} | Session {label}", expanded=(week_no == 1)):
+            if not exs:
+                st.caption("No exercises in this session.")
+                continue
 
-        for tid, sess_label, title, notes in templates:
-            rows = list_sc_template_exercises(tid)
-            for row in rows:
+            for row in exs:
                 (
-                    te_id, sort_order, group_key, group_order,
-                    exercise_id, ex_name, implement,
-                    mode, sets,
-                    reps_start, reps_step, reps_cap,
-                    time_start_sec, time_step_sec, time_cap_sec,
-                    pct_1rm_start, pct_1rm_step, pct_1rm_cap,
-                    load_increment_kg,
-                    rpe_target, rest_sec, intent, te_notes
+                    row_id, ex_name,
+                    sets, reps, pct_1rm, load_kg, rpe_t, rest_s, intent, notes,
+                    a_sets, a_reps, a_load, done, a_notes
                 ) = row
 
-                # e1RM only required if pct_1rm_start is set and metric supports it
-                e1rm_val: Optional[float] = None
-                if pct_1rm_start is not None and bw_use and bw_use > 0:
-                    if exercise_id not in e1rm_cache:
-                        metric = _metric_for_exercise_name(ex_name)
-                        if metric == "pullup_reps":
-                            e1rm_cache[exercise_id] = None
-                        else:
-                            est = estimate_e1rm_kg_for_exercise(
-                                patient_sex=sex,
-                                patient_age=int(age_years),
-                                patient_bw_kg=bw_use,
-                                presumed_level=presumed_level,
-                                exercise_id=int(exercise_id),
-                                metric="rel_1rm_bw",
-                            )
-                            e1rm_cache[exercise_id] = est.get("estimated_1rm_kg")
-                    e1rm_val = e1rm_cache.get(exercise_id)
+                st.markdown(f"**{ex_name}**")
+                c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.2, 1.2, 2.2])
 
-                targets = generate_sc_targets_for_template_row(
-                    weeks=int(block_weeks),
-                    deload_week=int(block_deload_week),
-                    implement=implement,
-                    mode=mode,
-                    sets=int(sets),
-                    reps_start=None if reps_start is None else int(reps_start),
-                    reps_step=int(reps_step or 2),
-                    reps_cap=None if reps_cap is None else int(reps_cap),
-                    time_start_sec=None if time_start_sec is None else int(time_start_sec),
-                    time_step_sec=int(time_step_sec or 10),
-                    time_cap_sec=None if time_cap_sec is None else int(time_cap_sec),
-                    pct_1rm_start=None if pct_1rm_start is None else float(pct_1rm_start),
-                    pct_1rm_step=float(pct_1rm_step or 0.0),
-                    pct_1rm_cap=None if pct_1rm_cap is None else float(pct_1rm_cap),
-                    load_increment_kg=float(load_increment_kg or 2.5),
-                    e1rm_kg=e1rm_val,
-                    rpe_target=None if rpe_target is None else int(rpe_target),
-                    rest_sec=None if rest_sec is None else int(rest_sec),
-                    intent=intent,
-                )
+                with c1:
+                    st.caption("Planned")
+                    st.write(f"{sets} x {reps}")
+                    if load_kg is not None:
+                        st.write(f"Load: {float(load_kg):.1f} kg")
+                    if pct_1rm is not None:
+                        st.write(f"%1RM: {int(float(pct_1rm)*100)}%")
 
-                for t in targets:
-                    upsert_sc_week_target(
-                        template_exercise_id=int(te_id),
-                        week_no=int(t["week_no"]),
-                        sets=int(t["sets"]),
-                        reps=None if t["reps"] is None else int(t["reps"]),
-                        time_sec=None if t["time_sec"] is None else int(t["time_sec"]),
-                        pct_1rm=None if t["pct_1rm"] is None else float(t["pct_1rm"]),
-                        load_kg=None if t["load_kg"] is None else float(t["load_kg"]),
-                        rpe_target=None if t["rpe_target"] is None else int(t["rpe_target"]),
-                        rest_sec=None if t["rest_sec"] is None else int(t["rest_sec"]),
-                        intent=t["intent"],
-                        notes=t.get("notes"),
+                with c2:
+                    completed_flag = st.checkbox("Done", value=bool(done), key=f"done_{row_id}")
+
+                with c3:
+                    actual_sets = st.number_input("Actual sets", min_value=0, step=1, value=int(a_sets) if a_sets is not None else 0, key=f"aset_{row_id}")
+                    actual_reps = st.number_input("Actual reps/time", min_value=0, step=1, value=int(a_reps) if a_reps is not None else 0, key=f"areps_{row_id}")
+
+                with c4:
+                    actual_load = st.number_input(
+                        "Actual load (kg)",
+                        min_value=0.0, step=0.5,
+                        value=float(a_load) if a_load is not None else 0.0,
+                        key=f"aload_{row_id}"
                     )
 
-        st.success("Targets generated/updated for this block.")
-        st.rerun()
+                with c5:
+                    actual_notes = st.text_input("Actual notes", value=a_notes or "", key=f"anote_{row_id}")
 
-    st.divider()
-
-    # -----------------------------
-    # View / edit targets + actual tracking
-    # -----------------------------
-    st.subheader("Block table (planned targets + actual tracking)")
-
-    rows = fetch_sc_week_targets_for_block(block_id)
-    if not rows:
-        st.info("No week targets exist yet. Save templates, then click 'Generate / refresh targets for this block'.")
-        st.stop()
-
-    df = pd.DataFrame(rows, columns=[
-        "block_id",
-        "session_label",
-        "template_id",
-        "template_exercise_id",
-        "sort_order",
-        "group_key",
-        "group_order",
-        "exercise_name",
-        "implement",
-        "mode",
-        "week_no",
-        "sets",
-        "reps",
-        "time_sec",
-        "pct_1rm",
-        "load_kg",
-        "rpe_target",
-        "rest_sec",
-        "intent",
-        "notes",
-        "actual_sets",
-        "actual_reps",
-        "actual_time_sec",
-        "actual_load_kg",
-        "completed_flag",
-    ])
-
-    # Display-friendly columns
-    df_view = df.copy()
-    df_view["completed_flag"] = df_view["completed_flag"].astype(int)
-
-    # Make a wide-ish but editable view
-    display_cols = [
-        "session_label", "week_no", "sort_order", "group_key", "group_order",
-        "exercise_name", "implement", "mode",
-        "sets", "reps", "time_sec", "pct_1rm", "load_kg", "rpe_target", "rest_sec", "intent", "notes",
-        "actual_sets", "actual_reps", "actual_time_sec", "actual_load_kg", "completed_flag",
-        "template_exercise_id",
-    ]
-
-    st.caption(
-        "Edit planned targets and/or actuals. "
-        "Planned fields update the target row; actual fields update actual tracking."
-    )
-
-    edited = st.data_editor(
-        df_view[display_cols],
-        use_container_width=True,
-        num_rows="fixed",
-        column_config={
-            "completed_flag": st.column_config.CheckboxColumn("Completed", help="Tick when completed", default=False),
-            "pct_1rm": st.column_config.NumberColumn("%1RM", format="%.2f"),
-            "load_kg": st.column_config.NumberColumn("Load (kg)", format="%.1f"),
-            "actual_load_kg": st.column_config.NumberColumn("Actual load (kg)", format="%.1f"),
-            "template_exercise_id": st.column_config.NumberColumn("Row ID", disabled=True),
-        },
-        disabled=[
-            "session_label", "week_no", "sort_order", "group_key", "group_order", "exercise_name", "implement", "mode",
-            "template_exercise_id",
-        ],
-        key="sc_block_editor",
-    )
-
-    if st.button("Save edits (planned + actual)", key="sc_save_edits_btn"):
-        # Merge edited values back with identifiers for updates
-        merged = df.merge(
-            edited[["template_exercise_id", "sets", "reps", "time_sec", "pct_1rm", "load_kg", "rpe_target", "rest_sec", "intent", "notes",
-                    "actual_sets", "actual_reps", "actual_time_sec", "actual_load_kg", "completed_flag"]],
-            on="template_exercise_id",
-            suffixes=("", "_new"),
-        )
-
-        # For each row, update planned and actuals
-        for _, r in merged.iterrows():
-            te_id = int(r["template_exercise_id"])
-            wk = int(r["week_no"])
-
-            upsert_sc_week_target(
-                template_exercise_id=te_id,
-                week_no=wk,
-                sets=int(r["sets_new"]) if pd.notna(r["sets_new"]) else int(r["sets"]),
-                reps=None if pd.isna(r["reps_new"]) else int(r["reps_new"]),
-                time_sec=None if pd.isna(r["time_sec_new"]) else int(r["time_sec_new"]),
-                pct_1rm=None if pd.isna(r["pct_1rm_new"]) else float(r["pct_1rm_new"]),
-                load_kg=None if pd.isna(r["load_kg_new"]) else float(r["load_kg_new"]),
-                rpe_target=None if pd.isna(r["rpe_target_new"]) else int(r["rpe_target_new"]),
-                rest_sec=None if pd.isna(r["rest_sec_new"]) else int(r["rest_sec_new"]),
-                intent=None if pd.isna(r["intent_new"]) else str(r["intent_new"]),
-                notes=None if pd.isna(r["notes_new"]) else str(r["notes_new"]),
-            )
-
-            set_sc_week_actuals(
-                template_exercise_id=te_id,
-                week_no=wk,
-                actual_sets=None if pd.isna(r["actual_sets_new"]) else int(r["actual_sets_new"]),
-                actual_reps=None if pd.isna(r["actual_reps_new"]) else int(r["actual_reps_new"]),
-                actual_time_sec=None if pd.isna(r["actual_time_sec_new"]) else int(r["actual_time_sec_new"]),
-                actual_load_kg=None if pd.isna(r["actual_load_kg_new"]) else float(r["actual_load_kg_new"]),
-                completed_flag=bool(int(r["completed_flag_new"])) if pd.notna(r["completed_flag_new"]) else bool(int(r["completed_flag"])),
-            )
-
-        st.success("Saved planned + actual updates.")
-        st.rerun()
-
-    st.divider()
-
-    # -----------------------------
-    # Optional: quick summary view by week/session
-    # -----------------------------
-    st.subheader("Completion summary")
-    df_sum = df.copy()
-    df_sum["completed_flag"] = df_sum["completed_flag"].astype(int)
-    summary = (
-        df_sum.groupby(["week_no", "session_label"], as_index=False)
-        .agg(rows=("template_exercise_id", "count"), completed=("completed_flag", "sum"))
-        .sort_values(["week_no", "session_label"])
-    )
-    summary["completion_rate"] = summary["completed"] / summary["rows"]
-    st.dataframe(summary, use_container_width=True)
+                if st.button("Save actual", key=f"save_actual_{row_id}"):
+                    update_sc_session_exercise_actual(
+                        row_id=int(row_id),
+                        actual_sets=(int(actual_sets) if actual_sets > 0 else None),
+                        actual_reps=(int(actual_reps) if actual_reps > 0 else None),
+                        actual_load_kg=(float(actual_load) if actual_load > 0 else None),
+                        completed_flag=bool(completed_flag),
+                        actual_notes=actual_notes.strip() if actual_notes else None,
+                    )
+                    st.success("Saved actual.")
+                    st.rerun()
