@@ -9,9 +9,7 @@ SQLite persistence layer for Ride Log app:
 - S&C library: exercises, rep schemes, normative strength standards
 - Patient profile (sex, dob, bodyweight, presumed_level)
 - Strength estimates (auto-estimated e1RM audit trail)
-- S&C programming engine:
-    blocks -> weeks -> sessions
-    session templates -> week targets -> actuals
+- S&C programming: blocks/weeks/sessions/session_exercises (+ actual tracking)
 
 Designed to be safe on Streamlit Cloud:
 - Creates ./data directory
@@ -23,7 +21,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, Any, List, Tuple, Dict
 
 
 # -----------------------------
@@ -43,6 +41,12 @@ def get_conn() -> sqlite3.Connection:
 def _table_columns(cur: sqlite3.Cursor, table_name: str) -> List[str]:
     cur.execute(f"PRAGMA table_info({table_name})")
     return [r[1] for r in cur.fetchall()]
+
+
+def _ensure_column(cur: sqlite3.Cursor, table: str, col: str, ddl: str) -> None:
+    cols = _table_columns(cur, table)
+    if col not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
 # -----------------------------
@@ -129,9 +133,9 @@ def init_db() -> None:
     CREATE TABLE IF NOT EXISTS exercises (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
-        category TEXT,                        -- squat/hinge/push/pull/ankle/etc
+        category TEXT,                        -- squat/hinge/push/pull/ankle/core/conditioning/etc
         laterality TEXT,                      -- bilateral/unilateral
-        implement TEXT,                       -- barbell/dumbbell/bodyweight/band/machine/etc
+        implement TEXT,                       -- barbell/dumbbell/bodyweight/machine/band/etc
         primary_muscles TEXT,
         notes TEXT,
         created_at TEXT DEFAULT (datetime('now'))
@@ -147,7 +151,7 @@ def init_db() -> None:
         reps_max INTEGER NOT NULL,
         sets_min INTEGER NOT NULL,
         sets_max INTEGER NOT NULL,
-        pct_1rm_min REAL,                     -- 0.00–1.00
+        pct_1rm_min REAL,                     -- 0.00–1.00 (nullable for BW/isometric)
         pct_1rm_max REAL,                     -- 0.00–1.00
         rpe_min INTEGER,
         rpe_max INTEGER,
@@ -201,9 +205,9 @@ def init_db() -> None:
         FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
     )
     """)
-    cols = _table_columns(cur, "patient_profile")
-    if "presumed_level" not in cols:
-        cur.execute("ALTER TABLE patient_profile ADD COLUMN presumed_level TEXT")
+
+    # Safe migration: add presumed_level if table existed without it
+    _ensure_column(cur, "patient_profile", "presumed_level", "presumed_level TEXT")
 
     # -----------------------------
     # Strength estimates (auto-estimated e1RM audit trail)
@@ -229,7 +233,7 @@ def init_db() -> None:
     """)
 
     # =========================================================
-    # S&C Programming engine (Block -> Weeks -> Sessions)
+    # S&C Programming: blocks/weeks/sessions/exercises (+ actuals)
     # =========================================================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS sc_blocks (
@@ -237,7 +241,7 @@ def init_db() -> None:
         patient_id INTEGER NOT NULL,
         start_date TEXT NOT NULL,            -- YYYY-MM-DD (Mon recommended)
         weeks INTEGER NOT NULL DEFAULT 6,
-        model TEXT NOT NULL DEFAULT 'hybrid_v1',
+        model TEXT NOT NULL,                 -- 'hybrid_v1'
         deload_week INTEGER NOT NULL DEFAULT 4,
         sessions_per_week INTEGER NOT NULL DEFAULT 2,
         goal TEXT,                           -- endurance/hypertrophy/strength/power/hybrid
@@ -253,7 +257,7 @@ def init_db() -> None:
         block_id INTEGER NOT NULL,
         week_no INTEGER NOT NULL,            -- 1..N
         week_start TEXT NOT NULL,            -- YYYY-MM-DD
-        focus TEXT,                          -- capacity/hypertrophy/strength/power/deload
+        focus TEXT,                          -- capacity/hypertrophy/strength/power/deload/hybrid
         deload_flag INTEGER NOT NULL DEFAULT 0,
         notes TEXT,
         created_at TEXT DEFAULT (datetime('now')),
@@ -266,8 +270,8 @@ def init_db() -> None:
     CREATE TABLE IF NOT EXISTS sc_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         week_id INTEGER NOT NULL,
-        session_label TEXT NOT NULL,         -- 'A' | 'B' | 'C'
-        day_hint TEXT,                       -- 'Mon'/'Tue' etc (optional)
+        session_label TEXT NOT NULL,         -- 'A' | 'B' | 'C' ...
+        day_hint TEXT,                       -- optional
         notes TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         FOREIGN KEY (week_id) REFERENCES sc_weeks(id) ON DELETE CASCADE,
@@ -275,107 +279,52 @@ def init_db() -> None:
     )
     """)
 
-    # =========================================================
-    # Templates (the row definitions that persist across weeks)
-    # and generated targets per week (editable)
-    # =========================================================
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS sc_session_templates (
+    CREATE TABLE IF NOT EXISTS sc_session_exercises (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        block_id INTEGER NOT NULL,
-        session_label TEXT NOT NULL,          -- template for 'A' or 'B'
-        title TEXT,                           -- optional display name
-        notes TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        FOREIGN KEY (block_id) REFERENCES sc_blocks(id) ON DELETE CASCADE,
-        UNIQUE(block_id, session_label)
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS sc_template_exercises (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        template_id INTEGER NOT NULL,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-
-        -- grouping for supersets (e.g., 'A', 'B', 'C') and ordering inside the group (1,2)
-        group_key TEXT,
-        group_order INTEGER,
-
+        session_id INTEGER NOT NULL,
         exercise_id INTEGER NOT NULL,
 
-        -- prescription mode: 'reps' or 'time'
-        mode TEXT NOT NULL DEFAULT 'reps',
-
-        -- sets are stable; reps/time will progress
-        sets INTEGER NOT NULL DEFAULT 3,
-
-        -- reps progression
-        reps_start INTEGER,
-        reps_step INTEGER DEFAULT 2,          -- +2 reps/week by default
-        reps_cap INTEGER,                      -- optional cap
-
-        -- time progression (seconds)
-        time_start_sec INTEGER,
-        time_step_sec INTEGER DEFAULT 10,     -- +10s/week by default
-        time_cap_sec INTEGER,
-
-        -- load prescription basis
-        pct_1rm_start REAL,                   -- 0..1 optional
-        pct_1rm_step REAL DEFAULT 0.00,       -- barbell can step by % if desired
-        pct_1rm_cap REAL,
-
-        -- for DB/KB progression rules: when reps cap reached, add load_increment_kg and reset reps to reps_start
-        load_increment_kg REAL DEFAULT 2.5,
-
-        rpe_target INTEGER,
-        rest_sec INTEGER,
+        -- targets (planned)
+        sets_target INTEGER NOT NULL,
+        reps_target INTEGER NOT NULL,
+        pct_1rm_target REAL,                 -- 0..1 nullable
+        load_kg_target REAL,                 -- nullable
+        rpe_target INTEGER,                  -- nullable
+        rest_sec_target INTEGER,             -- nullable
         intent TEXT,
         notes TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
 
-        FOREIGN KEY (template_id) REFERENCES sc_session_templates(id) ON DELETE CASCADE,
+        -- actuals
+        sets_actual INTEGER,
+        reps_actual INTEGER,
+        load_kg_actual REAL,
+        completed_flag INTEGER NOT NULL DEFAULT 0,
+        actual_notes TEXT,
+
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (session_id) REFERENCES sc_sessions(id) ON DELETE CASCADE,
         FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
     )
     """)
 
-    cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_sc_template_exercises_template
-    ON sc_template_exercises(template_id, sort_order)
-    """)
+    # Safe migrations if table existed before actual columns were added
+    cols = _table_columns(cur, "sc_session_exercises")
+    if "sets_target" not in cols:
+        # older schema support (if you had sets/reps columns)
+        # We do not auto-map legacy columns; we just add missing ones for forward compatibility.
+        _ensure_column(cur, "sc_session_exercises", "sets_target", "sets_target INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(cur, "sc_session_exercises", "reps_target", "reps_target INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(cur, "sc_session_exercises", "pct_1rm_target", "pct_1rm_target REAL")
+        _ensure_column(cur, "sc_session_exercises", "load_kg_target", "load_kg_target REAL")
+        _ensure_column(cur, "sc_session_exercises", "rpe_target", "rpe_target INTEGER")
+        _ensure_column(cur, "sc_session_exercises", "rest_sec_target", "rest_sec_target INTEGER")
 
-    # Generated + editable per week targets, plus actual tracking
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS sc_week_targets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        template_exercise_id INTEGER NOT NULL,
-        week_no INTEGER NOT NULL,
-
-        -- planned/target
-        sets INTEGER NOT NULL,
-        reps INTEGER,
-        time_sec INTEGER,
-        pct_1rm REAL,
-        load_kg REAL,
-        rpe_target INTEGER,
-        rest_sec INTEGER,
-        intent TEXT,
-        notes TEXT,
-
-        -- actuals (user requested)
-        actual_sets INTEGER,
-        actual_reps INTEGER,
-        actual_time_sec INTEGER,
-        actual_load_kg REAL,
-        completed_flag INTEGER NOT NULL DEFAULT 0,
-
-        updated_at TEXT DEFAULT (datetime('now')),
-        created_at TEXT DEFAULT (datetime('now')),
-
-        FOREIGN KEY (template_exercise_id) REFERENCES sc_template_exercises(id) ON DELETE CASCADE,
-        UNIQUE(template_exercise_id, week_no)
-    )
-    """)
+    _ensure_column(cur, "sc_session_exercises", "sets_actual", "sets_actual INTEGER")
+    _ensure_column(cur, "sc_session_exercises", "reps_actual", "reps_actual INTEGER")
+    _ensure_column(cur, "sc_session_exercises", "load_kg_actual", "load_kg_actual REAL")
+    _ensure_column(cur, "sc_session_exercises", "completed_flag", "completed_flag INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(cur, "sc_session_exercises", "actual_notes", "actual_notes TEXT")
 
     conn.commit()
     conn.close()
@@ -423,7 +372,7 @@ def add_ride(
     cur.execute("""
         INSERT INTO rides(patient_id, ride_date, distance_km, duration_min, rpe, notes)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (patient_id, ride_date, float(distance_km), int(duration_min), rpe, notes))
+    """, (int(patient_id), ride_date, float(distance_km), int(duration_min), rpe, notes))
     conn.commit()
     conn.close()
 
@@ -436,7 +385,7 @@ def fetch_rides(patient_id: int) -> List[Tuple[str, float, int, Optional[int], O
         FROM rides
         WHERE patient_id = ?
         ORDER BY ride_date DESC, id DESC
-    """, (patient_id,))
+    """, (int(patient_id),))
     rows = cur.fetchall()
     conn.close()
     return [(str(r[0]), float(r[1]), int(r[2]), r[3] if r[3] is None else int(r[3]), r[4]) for r in rows]
@@ -464,7 +413,7 @@ def upsert_week_plan(
             phase=excluded.phase,
             notes=excluded.notes,
             updated_at=datetime('now')
-    """, (patient_id, week_start, planned_km, planned_hours, phase, notes))
+    """, (int(patient_id), week_start, planned_km, planned_hours, phase, notes))
     conn.commit()
     conn.close()
 
@@ -477,16 +426,18 @@ def fetch_week_plans(patient_id: int) -> List[Tuple[str, Optional[float], Option
         FROM weekly_plan
         WHERE patient_id = ?
         ORDER BY week_start ASC
-    """, (patient_id,))
+    """, (int(patient_id),))
     rows = cur.fetchall()
     conn.close()
     out: List[Tuple[str, Optional[float], Optional[float], Optional[str], Optional[str]]] = []
     for r in rows:
-        out.append((str(r[0]),
-                    None if r[1] is None else float(r[1]),
-                    None if r[2] is None else float(r[2]),
-                    r[3],
-                    r[4]))
+        out.append((
+            str(r[0]),
+            None if r[1] is None else float(r[1]),
+            None if r[2] is None else float(r[2]),
+            r[3],
+            r[4],
+        ))
     return out
 
 
@@ -513,7 +464,7 @@ def save_strava_tokens(
             athlete_id=excluded.athlete_id,
             scope=excluded.scope,
             updated_at=datetime('now')
-    """, (patient_id, access_token, refresh_token, int(expires_at), athlete_id, scope))
+    """, (int(patient_id), access_token, refresh_token, int(expires_at), athlete_id, scope))
     conn.commit()
     conn.close()
 
@@ -525,10 +476,10 @@ def get_strava_tokens(patient_id: int):
         SELECT access_token, refresh_token, expires_at, athlete_id, scope
         FROM strava_tokens
         WHERE patient_id = ?
-    """, (patient_id,))
+    """, (int(patient_id),))
     row = cur.fetchone()
     conn.close()
-    return row
+    return row  # None or tuple(access, refresh, expires_at, athlete_id, scope)
 
 
 def mark_activity_synced(patient_id: int, activity_id: int) -> None:
@@ -537,7 +488,7 @@ def mark_activity_synced(patient_id: int, activity_id: int) -> None:
     cur.execute("""
         INSERT OR IGNORE INTO strava_synced(patient_id, strava_activity_id)
         VALUES (?, ?)
-    """, (patient_id, int(activity_id)))
+    """, (int(patient_id), int(activity_id)))
     conn.commit()
     conn.close()
 
@@ -550,7 +501,7 @@ def is_activity_synced(patient_id: int, activity_id: int) -> bool:
         FROM strava_synced
         WHERE patient_id = ? AND strava_activity_id = ?
         LIMIT 1
-    """, (patient_id, int(activity_id)))
+    """, (int(patient_id), int(activity_id)))
     ok = cur.fetchone() is not None
     conn.close()
     return ok
@@ -586,6 +537,19 @@ def upsert_exercise(
     return ex_id
 
 
+def get_exercise(exercise_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, category, laterality, implement, primary_muscles, notes
+        FROM exercises
+        WHERE id = ?
+    """, (int(exercise_id),))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
 def list_exercises() -> List[Tuple[int, str, Optional[str], Optional[str], Optional[str]]]:
     conn = get_conn()
     cur = conn.cursor()
@@ -597,20 +561,6 @@ def list_exercises() -> List[Tuple[int, str, Optional[str], Optional[str], Optio
     rows = cur.fetchall()
     conn.close()
     return [(int(r[0]), str(r[1]), r[2], r[3], r[4]) for r in rows]
-
-
-def get_exercise(exercise_id: int) -> Optional[Tuple]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, name, category, laterality, implement, primary_muscles, notes
-        FROM exercises
-        WHERE id = ?
-        LIMIT 1
-    """, (int(exercise_id),))
-    row = cur.fetchone()
-    conn.close()
-    return row
 
 
 # -----------------------------
@@ -735,7 +685,7 @@ def get_norm_standard(exercise_id: int, sex: str, age: int, metric: str):
 
 
 # -----------------------------
-# Patient profile
+# Patient profile (sex/dob/BW/level)
 # -----------------------------
 def upsert_patient_profile(
     patient_id: int,
@@ -770,11 +720,11 @@ def get_patient_profile(patient_id: int):
     """, (int(patient_id),))
     row = cur.fetchone()
     conn.close()
-    return row
+    return row  # None or (sex, dob, bodyweight_kg, presumed_level)
 
 
 # -----------------------------
-# Strength estimates (stored)
+# Strength estimates (auto-estimated e1RM audit)
 # -----------------------------
 def upsert_strength_estimate(
     patient_id: int,
@@ -943,7 +893,7 @@ def estimate_unilateral_from_bilateral(
 
 
 # =========================================================
-# S&C programming helpers (blocks/weeks/sessions)
+# S&C Programming helpers (blocks/weeks/sessions/exercises)
 # =========================================================
 def create_sc_block(
     patient_id: int,
@@ -1030,79 +980,39 @@ def upsert_sc_session(
     return sid
 
 
-# =========================================================
-# Template helpers (persist across weeks)
-# =========================================================
-def upsert_sc_session_template(block_id: int, session_label: str, title: Optional[str] = None, notes: Optional[str] = None) -> int:
+def clear_sc_session_exercises(session_id: int) -> None:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO sc_session_templates(block_id, session_label, title, notes)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(block_id, session_label) DO UPDATE SET
-            title=excluded.title,
-            notes=excluded.notes
-    """, (int(block_id), session_label, title, notes))
-    conn.commit()
-    cur.execute("SELECT id FROM sc_session_templates WHERE block_id=? AND session_label=?", (int(block_id), session_label))
-    tid = int(cur.fetchone()[0])
-    conn.close()
-    return tid
-
-
-def clear_sc_template_exercises(template_id: int) -> None:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM sc_template_exercises WHERE template_id = ?", (int(template_id),))
+    cur.execute("DELETE FROM sc_session_exercises WHERE session_id = ?", (int(session_id),))
     conn.commit()
     conn.close()
 
 
-def add_sc_template_exercise(
-    template_id: int,
+def add_sc_session_exercise(
+    session_id: int,
     exercise_id: int,
-    sort_order: int,
-    group_key: Optional[str],
-    group_order: Optional[int],
-    mode: str,
-    sets: int,
-    reps_start: Optional[int],
-    reps_step: int,
-    reps_cap: Optional[int],
-    time_start_sec: Optional[int],
-    time_step_sec: int,
-    time_cap_sec: Optional[int],
-    pct_1rm_start: Optional[float],
-    pct_1rm_step: float,
-    pct_1rm_cap: Optional[float],
-    load_increment_kg: float,
+    sets_target: int,
+    reps_target: int,
+    pct_1rm_target: Optional[float],
+    load_kg_target: Optional[float],
     rpe_target: Optional[int],
-    rest_sec: Optional[int],
+    rest_sec_target: Optional[int],
     intent: Optional[str],
     notes: Optional[str],
 ) -> int:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO sc_template_exercises(
-            template_id, sort_order, group_key, group_order, exercise_id,
-            mode, sets,
-            reps_start, reps_step, reps_cap,
-            time_start_sec, time_step_sec, time_cap_sec,
-            pct_1rm_start, pct_1rm_step, pct_1rm_cap,
-            load_increment_kg,
-            rpe_target, rest_sec, intent, notes
+        INSERT INTO sc_session_exercises(
+            session_id, exercise_id,
+            sets_target, reps_target, pct_1rm_target, load_kg_target,
+            rpe_target, rest_sec_target, intent, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        int(template_id), int(sort_order), group_key, group_order, int(exercise_id),
-        (mode or "reps"),
-        int(sets),
-        reps_start, int(reps_step), reps_cap,
-        time_start_sec, int(time_step_sec), time_cap_sec,
-        pct_1rm_start, float(pct_1rm_step), pct_1rm_cap,
-        float(load_increment_kg),
-        rpe_target, rest_sec, intent, notes
+        int(session_id), int(exercise_id),
+        int(sets_target), int(reps_target), pct_1rm_target, load_kg_target,
+        rpe_target, rest_sec_target, intent, notes
     ))
     conn.commit()
     rid = int(cur.lastrowid)
@@ -1110,272 +1020,73 @@ def add_sc_template_exercise(
     return rid
 
 
-def list_sc_session_templates(block_id: int) -> List[Tuple]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, session_label, title, notes
-        FROM sc_session_templates
-        WHERE block_id = ?
-        ORDER BY session_label ASC
-    """, (int(block_id),))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-def list_sc_template_exercises(template_id: int) -> List[Tuple]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            te.id, te.sort_order, te.group_key, te.group_order,
-            te.exercise_id, e.name, e.implement,
-            te.mode, te.sets,
-            te.reps_start, te.reps_step, te.reps_cap,
-            te.time_start_sec, te.time_step_sec, te.time_cap_sec,
-            te.pct_1rm_start, te.pct_1rm_step, te.pct_1rm_cap,
-            te.load_increment_kg,
-            te.rpe_target, te.rest_sec, te.intent, te.notes
-        FROM sc_template_exercises te
-        JOIN exercises e ON e.id = te.exercise_id
-        WHERE te.template_id = ?
-        ORDER BY te.sort_order ASC, te.id ASC
-    """, (int(template_id),))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-# =========================================================
-# Week targets (generated + editable) + actuals
-# =========================================================
-def upsert_sc_week_target(
-    template_exercise_id: int,
-    week_no: int,
-    sets: int,
-    reps: Optional[int],
-    time_sec: Optional[int],
-    pct_1rm: Optional[float],
-    load_kg: Optional[float],
-    rpe_target: Optional[int],
-    rest_sec: Optional[int],
-    intent: Optional[str],
-    notes: Optional[str],
-) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO sc_week_targets(
-            template_exercise_id, week_no,
-            sets, reps, time_sec, pct_1rm, load_kg,
-            rpe_target, rest_sec, intent, notes
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(template_exercise_id, week_no) DO UPDATE SET
-            sets=excluded.sets,
-            reps=excluded.reps,
-            time_sec=excluded.time_sec,
-            pct_1rm=excluded.pct_1rm,
-            load_kg=excluded.load_kg,
-            rpe_target=excluded.rpe_target,
-            rest_sec=excluded.rest_sec,
-            intent=excluded.intent,
-            notes=excluded.notes,
-            updated_at=datetime('now')
-    """, (
-        int(template_exercise_id), int(week_no),
-        int(sets), reps, time_sec, pct_1rm, load_kg,
-        rpe_target, rest_sec, intent, notes
-    ))
-    conn.commit()
-    cur.execute("SELECT id FROM sc_week_targets WHERE template_exercise_id=? AND week_no=?", (int(template_exercise_id), int(week_no)))
-    wid = int(cur.fetchone()[0])
-    conn.close()
-    return wid
-
-
-def set_sc_week_actuals(
-    template_exercise_id: int,
-    week_no: int,
-    actual_sets: Optional[int],
-    actual_reps: Optional[int],
-    actual_time_sec: Optional[int],
-    actual_load_kg: Optional[float],
+def update_sc_session_exercise_actual(
+    row_id: int,
+    sets_actual: Optional[int],
+    reps_actual: Optional[int],
+    load_kg_actual: Optional[float],
     completed_flag: bool,
+    actual_notes: Optional[str],
 ) -> None:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        UPDATE sc_week_targets
-        SET actual_sets = ?,
-            actual_reps = ?,
-            actual_time_sec = ?,
-            actual_load_kg = ?,
-            completed_flag = ?,
-            updated_at = datetime('now')
-        WHERE template_exercise_id = ? AND week_no = ?
+        UPDATE sc_session_exercises
+        SET sets_actual=?,
+            reps_actual=?,
+            load_kg_actual=?,
+            completed_flag=?,
+            actual_notes=?
+        WHERE id = ?
     """, (
-        actual_sets, actual_reps, actual_time_sec, actual_load_kg,
+        sets_actual,
+        reps_actual,
+        load_kg_actual,
         1 if completed_flag else 0,
-        int(template_exercise_id), int(week_no)
+        actual_notes,
+        int(row_id),
     ))
     conn.commit()
     conn.close()
 
 
-def fetch_sc_week_targets_for_block(block_id: int) -> List[Tuple]:
+def fetch_sc_block_detail(block_id: int):
     """
-    Flat rows for UI tables:
+    Returns list of tuples:
+      (week_no, week_start, focus, deload_flag, session_label, day_hint, exercises_list)
 
-    block_id, session_label, template_id, template_exercise_id, sort_order, group_key, group_order,
-    exercise_name, implement, mode,
-    week_no,
-    sets, reps, time_sec, pct_1rm, load_kg, rpe_target, rest_sec, intent, notes,
-    actual_sets, actual_reps, actual_time_sec, actual_load_kg, completed_flag
+    exercises_list rows:
+      (row_id, exercise_name, sets_t, reps_t, pct_t, load_t, rpe_t, rest_t, intent, notes,
+       sets_a, reps_a, load_a, completed, actual_notes)
     """
     conn = get_conn()
     cur = conn.cursor()
+
     cur.execute("""
-        SELECT
-            st.block_id,
-            st.session_label,
-            st.id AS template_id,
-            te.id AS template_exercise_id,
-            te.sort_order, te.group_key, te.group_order,
-            e.name AS exercise_name,
-            e.implement,
-            te.mode,
-            wt.week_no,
-            wt.sets, wt.reps, wt.time_sec, wt.pct_1rm, wt.load_kg, wt.rpe_target, wt.rest_sec, wt.intent, wt.notes,
-            wt.actual_sets, wt.actual_reps, wt.actual_time_sec, wt.actual_load_kg, wt.completed_flag
-        FROM sc_session_templates st
-        JOIN sc_template_exercises te ON te.template_id = st.id
-        JOIN exercises e ON e.id = te.exercise_id
-        JOIN sc_week_targets wt ON wt.template_exercise_id = te.id
-        WHERE st.block_id = ?
-        ORDER BY st.session_label ASC, te.sort_order ASC, wt.week_no ASC
+        SELECT w.id, w.week_no, w.week_start, w.focus, w.deload_flag,
+               s.id, s.session_label, s.day_hint
+        FROM sc_weeks w
+        JOIN sc_sessions s ON s.week_id = w.id
+        WHERE w.block_id = ?
+        ORDER BY w.week_no ASC, s.session_label ASC
     """, (int(block_id),))
     rows = cur.fetchall()
+
+    out = []
+    for r in rows:
+        week_id, week_no, week_start, focus, deload_flag, session_id, label, day_hint = r
+        cur.execute("""
+            SELECT x.id, e.name,
+                   x.sets_target, x.reps_target, x.pct_1rm_target, x.load_kg_target,
+                   x.rpe_target, x.rest_sec_target, x.intent, x.notes,
+                   x.sets_actual, x.reps_actual, x.load_kg_actual, x.completed_flag, x.actual_notes
+            FROM sc_session_exercises x
+            JOIN exercises e ON e.id = x.exercise_id
+            WHERE x.session_id = ?
+            ORDER BY x.id ASC
+        """, (int(session_id),))
+        exs = cur.fetchall()
+        out.append((int(week_no), str(week_start), focus, bool(deload_flag), str(label), day_hint, exs))
+
     conn.close()
-    return rows
-
-
-# =========================================================
-# Auto-suggestion engine for week targets
-# =========================================================
-def _round_load(load: float, inc: float = 2.5) -> float:
-    if inc <= 0:
-        return float(load)
-    return round(float(load) / float(inc)) * float(inc)
-
-
-def _auto_progress_reps_dbkb(reps_start: int, reps_step: int, reps_cap: int, week_no: int) -> int:
-    # linear reps, capped
-    return min(int(reps_start) + int(reps_step) * (int(week_no) - 1), int(reps_cap))
-
-
-def generate_sc_targets_for_template_row(
-    *,
-    weeks: int,
-    deload_week: int,
-    implement: Optional[str],
-    mode: str,
-    sets: int,
-    reps_start: Optional[int],
-    reps_step: int,
-    reps_cap: Optional[int],
-    time_start_sec: Optional[int],
-    time_step_sec: int,
-    time_cap_sec: Optional[int],
-    pct_1rm_start: Optional[float],
-    pct_1rm_step: float,
-    pct_1rm_cap: Optional[float],
-    load_increment_kg: float,
-    e1rm_kg: Optional[float],
-    rpe_target: Optional[int],
-    rest_sec: Optional[int],
-    intent: Optional[str],
-) -> List[Dict[str, Any]]:
-    """
-    Implements your default hierarchy:
-    - bodyweight/isometric: linear reps or time
-    - DB/KB: reps up then load
-    - barbell: load up within rep range
-
-    Deload week: reduce volume (sets -1) and reduce load/pct by ~10% if load-based.
-    """
-    impl = (implement or "").lower()
-    md = (mode or "reps").lower()
-
-    out: List[Dict[str, Any]] = []
-
-    for wk in range(1, int(weeks) + 1):
-        deload = (int(wk) == int(deload_week))
-        sets_wk = max(1, int(sets) - 1) if deload else int(sets)
-
-        reps_wk: Optional[int] = None
-        time_wk: Optional[int] = None
-        pct_wk: Optional[float] = None
-        load_wk: Optional[float] = None
-
-        if md == "time":
-            base = int(time_start_sec or 30)
-            step = int(time_step_sec or 10)
-            cap = int(time_cap_sec) if time_cap_sec else None
-            t = base + step * (wk - 1)
-            if cap is not None:
-                t = min(t, cap)
-            if deload:
-                t = max(10, int(round(t * 0.85)))
-            time_wk = int(t)
-
-        else:
-            # reps mode
-            base = int(reps_start or 8)
-            step = int(reps_step or 2)
-            cap = int(reps_cap) if reps_cap else None
-            r = base + step * (wk - 1)
-            if cap is not None:
-                r = min(r, cap)
-            if deload:
-                r = max(1, int(round(r * 0.85)))
-            reps_wk = int(r)
-
-        # load-based handling
-        if e1rm_kg and e1rm_kg > 0 and pct_1rm_start is not None:
-            # pct-based prescription (good default for barbell)
-            p0 = float(pct_1rm_start)
-            ps = float(pct_1rm_step or 0.0)
-            pcap = float(pct_1rm_cap) if pct_1rm_cap is not None else None
-            p = p0 + ps * (wk - 1)
-            if pcap is not None:
-                p = min(p, pcap)
-            if deload:
-                p = max(0.30, p * 0.90)
-            pct_wk = float(p)
-
-            # compute load
-            inc = float(load_increment_kg or 2.5)
-            load_wk = _round_load(float(e1rm_kg) * float(pct_wk), inc=inc)
-
-        else:
-            # DB/KB (reps up then load) uses no pct; clinician can add pct later if desired
-            # For now we only compute load if clinician supplies pct; otherwise leave null.
-            pct_wk = None
-            load_wk = None
-
-        out.append({
-            "week_no": wk,
-            "sets": sets_wk,
-            "reps": reps_wk,
-            "time_sec": time_wk,
-            "pct_1rm": pct_wk,
-            "load_kg": load_wk,
-            "rpe_target": rpe_target,
-            "rest_sec": rest_sec,
-            "intent": intent,
-            "notes": "Deload" if deload else None,
-        })
-
     return out
