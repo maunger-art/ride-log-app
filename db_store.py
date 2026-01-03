@@ -1,36 +1,57 @@
+"""
+db_store.py
+
+SQLite persistence layer for Ride Log app:
+- Patients
+- Rides
+- Weekly plan
+- Strava OAuth tokens + sync tracking
+- S&C library: exercises, rep schemes, normative strength standards
+- Patient profile (sex, dob, bodyweight, presumed_level)
+- Strength estimates (auto-estimated e1RM audit trail)
+
+Designed to be safe on Streamlit Cloud:
+- Creates ./data directory
+- Uses CREATE TABLE IF NOT EXISTS
+- Includes lightweight, safe migrations for new columns
+"""
+
+from __future__ import annotations
+
 import os
 import sqlite3
-from typing import Optional, List, Tuple, Any
+from typing import Optional, Any, List, Tuple
 
-# -------------------------------------------------------------------
-# Database connection
-# -------------------------------------------------------------------
 
-DB_FILENAME = "ride_log.db"
+# -----------------------------
+# Database location
+# -----------------------------
+DB_DIR = os.environ.get("RIDELOG_DB_DIR", "data")
+DB_PATH = os.environ.get("RIDELOG_DB_PATH", os.path.join(DB_DIR, "ride_log.db"))
 
-def get_db_path() -> str:
-    # Store DB alongside this file for Streamlit Cloud compatibility
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, DB_FILENAME)
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(get_db_path(), check_same_thread=False)
+    os.makedirs(DB_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
-# -------------------------------------------------------------------
-# Schema init
-# -------------------------------------------------------------------
+def _table_columns(cur: sqlite3.Cursor, table_name: str) -> List[str]:
+    cur.execute(f"PRAGMA table_info({table_name})")
+    return [r[1] for r in cur.fetchall()]
 
-def init_db():
+
+# -----------------------------
+# Init / migrations
+# -----------------------------
+def init_db() -> None:
     conn = get_conn()
     cur = conn.cursor()
 
     # -----------------------------
-    # Core app tables
+    # Core tables
     # -----------------------------
-
     cur.execute("""
     CREATE TABLE IF NOT EXISTS patients (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,10 +64,10 @@ def init_db():
     CREATE TABLE IF NOT EXISTS rides (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         patient_id INTEGER NOT NULL,
-        ride_date TEXT NOT NULL,          -- YYYY-MM-DD
-        distance_km REAL NOT NULL DEFAULT 0,
-        duration_min INTEGER NOT NULL DEFAULT 0,
-        rpe INTEGER,                      -- nullable
+        ride_date TEXT NOT NULL,              -- YYYY-MM-DD
+        distance_km REAL NOT NULL,
+        duration_min INTEGER NOT NULL,
+        rpe INTEGER,                          -- nullable
         notes TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
@@ -58,37 +79,29 @@ def init_db():
     ON rides(patient_id, ride_date)
     """)
 
-    # Weekly plan table: IMPORTANT patient_id is NOT NULL
     cur.execute("""
     CREATE TABLE IF NOT EXISTS weekly_plan (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
         patient_id INTEGER NOT NULL,
-        week_start TEXT NOT NULL,         -- YYYY-MM-DD (Monday)
+        week_start TEXT NOT NULL,             -- Monday YYYY-MM-DD
         planned_km REAL,
         planned_hours REAL,
         phase TEXT,
         notes TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (patient_id, week_start),
         FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
     )
-    """)
-
-    cur.execute("""
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_weekly_plan_patient_week
-    ON weekly_plan(patient_id, week_start)
     """)
 
     # -----------------------------
     # Strava integration tables
     # -----------------------------
-
     cur.execute("""
     CREATE TABLE IF NOT EXISTS strava_tokens (
         patient_id INTEGER PRIMARY KEY,
         access_token TEXT NOT NULL,
         refresh_token TEXT NOT NULL,
-        expires_at INTEGER NOT NULL,      -- epoch seconds
+        expires_at INTEGER NOT NULL,          -- epoch seconds
         athlete_id INTEGER,
         scope TEXT,
         updated_at TEXT DEFAULT (datetime('now')),
@@ -107,80 +120,107 @@ def init_db():
     """)
 
     # -----------------------------
-    # Strength standards + S&C planning tables (MVP)
+    # S&C library tables
     # -----------------------------
-
     cur.execute("""
     CREATE TABLE IF NOT EXISTS exercises (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
-        movement_pattern TEXT,
-        laterality TEXT NOT NULL,     -- bilateral / unilateral
-        modality TEXT,               -- barbell / dumbbell / kettlebell / machine / bodyweight / band
+        category TEXT,                        -- squat/hinge/push/pull/ankle/etc
+        laterality TEXT,                      -- bilateral/unilateral
+        implement TEXT,                       -- barbell/dumbbell/bodyweight/etc
         primary_muscles TEXT,
-        notes TEXT
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
     )
     """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS rep_schemes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        goal TEXT NOT NULL,          -- endurance / hypertrophy / strength / power
-        phase TEXT,                  -- optional: base/build/peak/maintain
+        goal TEXT NOT NULL,                   -- endurance/hypertrophy/strength/power
+        phase TEXT,                           -- base/build/peak etc
         reps_min INTEGER NOT NULL,
         reps_max INTEGER NOT NULL,
         sets_min INTEGER NOT NULL,
         sets_max INTEGER NOT NULL,
-        pct_1rm_min REAL,
-        pct_1rm_max REAL,
-        rpe_min REAL,
-        rpe_max REAL,
+        pct_1rm_min REAL,                     -- 0.00–1.00
+        pct_1rm_max REAL,                     -- 0.00–1.00
+        rpe_min INTEGER,
+        rpe_max INTEGER,
         rest_sec_min INTEGER,
         rest_sec_max INTEGER,
-        intent TEXT
+        intent TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
     )
+    """)
+
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_rep_schemes_goal
+    ON rep_schemes(goal)
     """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS norm_strength_standards (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         exercise_id INTEGER NOT NULL,
-        sex TEXT NOT NULL,           -- male / female
+        sex TEXT NOT NULL,                    -- male/female
         age_min INTEGER NOT NULL,
         age_max INTEGER NOT NULL,
-        metric TEXT NOT NULL,        -- rel_1rm_bw or pullup_reps
-        poor REAL,
-        fair REAL,
-        good REAL,
-        excellent REAL,
+        metric TEXT NOT NULL,                 -- rel_1rm_bw | pullup_reps
+        poor REAL NOT NULL,
+        fair REAL NOT NULL,
+        good REAL NOT NULL,
+        excellent REAL NOT NULL,
         source TEXT,
         notes TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
         FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
     )
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS patients_profile (
+    CREATE INDEX IF NOT EXISTS idx_norm_lookup
+    ON norm_strength_standards(exercise_id, sex, metric, age_min, age_max)
+    """)
+
+    # =========================================================
+    # MIGRATIONS: Patient profile (presumed_level) + strength estimates
+    # =========================================================
+    # Patient profile table (create if missing)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS patient_profile (
         patient_id INTEGER PRIMARY KEY,
-        sex TEXT,                    -- male/female
-        dob TEXT,                    -- YYYY-MM-DD (optional)
+        sex TEXT,                             -- 'male' | 'female'
+        dob TEXT,                             -- 'YYYY-MM-DD' optional
         bodyweight_kg REAL,
+        presumed_level TEXT,                  -- 'novice' | 'intermediate' | 'advanced' | 'expert'
         updated_at TEXT DEFAULT (datetime('now')),
         FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
     )
     """)
 
+    # Safe migration: add presumed_level if table existed without it
+    cols = _table_columns(cur, "patient_profile")
+    if "presumed_level" not in cols:
+        cur.execute("ALTER TABLE patient_profile ADD COLUMN presumed_level TEXT")
+
+    # Strength estimates table (create if missing)
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS patient_strength_tests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    CREATE TABLE IF NOT EXISTS strength_estimates (
         patient_id INTEGER NOT NULL,
         exercise_id INTEGER NOT NULL,
-        test_date TEXT NOT NULL,     -- YYYY-MM-DD
-        estimated_1rm_kg REAL,
-        reps INTEGER,
-        load_kg REAL,
-        side TEXT,                   -- left/right/bilateral
+        as_of_date TEXT NOT NULL,             -- YYYY-MM-DD
+        estimated_1rm_kg REAL,                -- null for pull-ups
+        estimated_rel_1rm_bw REAL,            -- ratio used (audit)
+        level_used TEXT NOT NULL,
+        sex_used TEXT NOT NULL,
+        age_used INTEGER NOT NULL,
+        bw_used REAL,                         -- can be null if unknown
+        method TEXT NOT NULL,                 -- 'norm_level_band_v1' etc
         notes TEXT,
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (patient_id, exercise_id),
         FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE,
         FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
     )
@@ -190,39 +230,44 @@ def init_db():
     conn.close()
 
 
-# -------------------------------------------------------------------
+# -----------------------------
 # Patients
-# -------------------------------------------------------------------
-
+# -----------------------------
 def upsert_patient(name: str) -> int:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO patients(name)
-        VALUES (?)
-        ON CONFLICT(name) DO NOTHING
+        INSERT INTO patients(name) VALUES (?)
+        ON CONFLICT(name) DO UPDATE SET name=excluded.name
     """, (name,))
     conn.commit()
+    # fetch id
     cur.execute("SELECT id FROM patients WHERE name = ?", (name,))
-    pid = cur.fetchone()[0]
+    pid = int(cur.fetchone()[0])
     conn.close()
     return pid
+
 
 def list_patients() -> List[Tuple[int, str]]:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, name FROM patients ORDER BY name")
+    cur.execute("SELECT id, name FROM patients ORDER BY name ASC")
     rows = cur.fetchall()
     conn.close()
-    return rows
+    return [(int(r[0]), str(r[1])) for r in rows]
 
 
-# -------------------------------------------------------------------
+# -----------------------------
 # Rides
-# -------------------------------------------------------------------
-
-def add_ride(patient_id: int, ride_date: str, distance_km: float, duration_min: int,
-             rpe: Optional[int], notes: Optional[str]):
+# -----------------------------
+def add_ride(
+    patient_id: int,
+    ride_date: str,
+    distance_km: float,
+    duration_min: int,
+    rpe: Optional[int],
+    notes: Optional[str],
+) -> None:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -232,7 +277,8 @@ def add_ride(patient_id: int, ride_date: str, distance_km: float, duration_min: 
     conn.commit()
     conn.close()
 
-def fetch_rides(patient_id: int, limit: int = 2000) -> List[Tuple[str, float, int, Optional[int], Optional[str]]]:
+
+def fetch_rides(patient_id: int) -> List[Tuple[str, float, int, Optional[int], Optional[str]]]:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -240,27 +286,28 @@ def fetch_rides(patient_id: int, limit: int = 2000) -> List[Tuple[str, float, in
         FROM rides
         WHERE patient_id = ?
         ORDER BY ride_date DESC, id DESC
-        LIMIT ?
-    """, (patient_id, limit))
+    """, (patient_id,))
     rows = cur.fetchall()
     conn.close()
-    return rows
+    return [(str(r[0]), float(r[1]), int(r[2]), r[3] if r[3] is None else int(r[3]), r[4]) for r in rows]
 
 
-# -------------------------------------------------------------------
+# -----------------------------
 # Weekly plan
-# -------------------------------------------------------------------
-
-def upsert_week_plan(patient_id: int, week_start: str,
-                     planned_km: Optional[float],
-                     planned_hours: Optional[float],
-                     phase: Optional[str],
-                     notes: Optional[str]):
+# -----------------------------
+def upsert_week_plan(
+    patient_id: int,
+    week_start: str,
+    planned_km: Optional[float],
+    planned_hours: Optional[float],
+    phase: Optional[str],
+    notes: Optional[str],
+) -> None:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO weekly_plan(patient_id, week_start, planned_km, planned_hours, phase, notes, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+        INSERT INTO weekly_plan(patient_id, week_start, planned_km, planned_hours, phase, notes)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(patient_id, week_start) DO UPDATE SET
             planned_km=excluded.planned_km,
             planned_hours=excluded.planned_hours,
@@ -270,6 +317,7 @@ def upsert_week_plan(patient_id: int, week_start: str,
     """, (patient_id, week_start, planned_km, planned_hours, phase, notes))
     conn.commit()
     conn.close()
+
 
 def fetch_week_plans(patient_id: int) -> List[Tuple[str, Optional[float], Optional[float], Optional[str], Optional[str]]]:
     conn = get_conn()
@@ -282,15 +330,27 @@ def fetch_week_plans(patient_id: int) -> List[Tuple[str, Optional[float], Option
     """, (patient_id,))
     rows = cur.fetchall()
     conn.close()
-    return rows
+    out = []
+    for r in rows:
+        out.append((str(r[0]),
+                    None if r[1] is None else float(r[1]),
+                    None if r[2] is None else float(r[2]),
+                    r[3],
+                    r[4]))
+    return out
 
 
-# -------------------------------------------------------------------
-# Strava tokens + sync
-# -------------------------------------------------------------------
-
-def save_strava_tokens(patient_id: int, access_token: str, refresh_token: str, expires_at: int,
-                       athlete_id: Optional[int], scope: Optional[str]):
+# -----------------------------
+# Strava tokens + sync tracking
+# -----------------------------
+def save_strava_tokens(
+    patient_id: int,
+    access_token: str,
+    refresh_token: str,
+    expires_at: int,
+    athlete_id: Optional[int],
+    scope: Optional[str],
+) -> None:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -307,6 +367,7 @@ def save_strava_tokens(patient_id: int, access_token: str, refresh_token: str, e
     conn.commit()
     conn.close()
 
+
 def get_strava_tokens(patient_id: int):
     conn = get_conn()
     cur = conn.cursor()
@@ -317,9 +378,10 @@ def get_strava_tokens(patient_id: int):
     """, (patient_id,))
     row = cur.fetchone()
     conn.close()
-    return row
+    return row  # None or tuple(access, refresh, expires_at, athlete_id, scope)
 
-def mark_activity_synced(patient_id: int, activity_id: int):
+
+def mark_activity_synced(patient_id: int, activity_id: int) -> None:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -328,6 +390,7 @@ def mark_activity_synced(patient_id: int, activity_id: int):
     """, (patient_id, int(activity_id)))
     conn.commit()
     conn.close()
+
 
 def is_activity_synced(patient_id: int, activity_id: int) -> bool:
     conn = get_conn()
@@ -343,188 +406,374 @@ def is_activity_synced(patient_id: int, activity_id: int) -> bool:
     return ok
 
 
-# -------------------------------------------------------------------
-# Strength standards + rep schemes helpers
-# -------------------------------------------------------------------
+# -----------------------------
+# S&C library: exercises
+# -----------------------------
+def upsert_exercise(
+    name: str,
+    category: Optional[str] = None,
+    laterality: Optional[str] = None,
+    implement: Optional[str] = None,
+    primary_muscles: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO exercises(name, category, laterality, implement, primary_muscles, notes)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            category=excluded.category,
+            laterality=excluded.laterality,
+            implement=excluded.implement,
+            primary_muscles=excluded.primary_muscles,
+            notes=excluded.notes
+    """, (name, category, laterality, implement, primary_muscles, notes))
+    conn.commit()
+    cur.execute("SELECT id FROM exercises WHERE name = ?", (name,))
+    ex_id = int(cur.fetchone()[0])
+    conn.close()
+    return ex_id
+
+
+def list_exercises() -> List[Tuple[int, str, Optional[str], Optional[str], Optional[str]]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, category, laterality, implement
+        FROM exercises
+        ORDER BY name ASC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return [(int(r[0]), str(r[1]), r[2], r[3], r[4]) for r in rows]
+
+
+# -----------------------------
+# S&C library: rep schemes
+# -----------------------------
+def upsert_rep_scheme(
+    goal: str,
+    phase: Optional[str],
+    reps_min: int,
+    reps_max: int,
+    sets_min: int,
+    sets_max: int,
+    pct_1rm_min: Optional[float],
+    pct_1rm_max: Optional[float],
+    rpe_min: Optional[int],
+    rpe_max: Optional[int],
+    rest_sec_min: Optional[int],
+    rest_sec_max: Optional[int],
+    intent: Optional[str],
+) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO rep_schemes(
+            goal, phase, reps_min, reps_max, sets_min, sets_max,
+            pct_1rm_min, pct_1rm_max, rpe_min, rpe_max,
+            rest_sec_min, rest_sec_max, intent
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        goal, phase, int(reps_min), int(reps_max), int(sets_min), int(sets_max),
+        pct_1rm_min, pct_1rm_max, rpe_min, rpe_max,
+        rest_sec_min, rest_sec_max, intent
+    ))
+    conn.commit()
+    rs_id = int(cur.lastrowid)
+    conn.close()
+    return rs_id
+
+
+def list_rep_schemes(goal: str) -> List[Tuple]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, goal, phase, reps_min, reps_max, sets_min, sets_max,
+               pct_1rm_min, pct_1rm_max, rpe_min, rpe_max,
+               rest_sec_min, rest_sec_max, intent
+        FROM rep_schemes
+        WHERE goal = ?
+        ORDER BY id ASC
+    """, (goal,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+# -----------------------------
+# S&C library: normative standards
+# -----------------------------
+def upsert_norm_standard(
+    exercise_id: int,
+    sex: str,
+    age_min: int,
+    age_max: int,
+    metric: str,
+    poor: float,
+    fair: float,
+    good: float,
+    excellent: float,
+    source: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO norm_strength_standards(
+            exercise_id, sex, age_min, age_max, metric,
+            poor, fair, good, excellent, source, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        int(exercise_id), sex, int(age_min), int(age_max), metric,
+        float(poor), float(fair), float(good), float(excellent), source, notes
+    ))
+    conn.commit()
+    ns_id = int(cur.lastrowid)
+    conn.close()
+    return ns_id
+
 
 def count_norm_rows() -> int:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM norm_strength_standards")
-    n = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(1) FROM norm_strength_standards")
+    n = int(cur.fetchone()[0])
     conn.close()
     return n
 
-def list_exercises():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, name, movement_pattern, laterality, modality
-        FROM exercises
-        ORDER BY name
-    """)
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def upsert_exercise(name: str, movement_pattern: Optional[str], laterality: str, modality: Optional[str],
-                    primary_muscles: Optional[str] = None, notes: Optional[str] = None) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO exercises(name, movement_pattern, laterality, modality, primary_muscles, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            movement_pattern=excluded.movement_pattern,
-            laterality=excluded.laterality,
-            modality=excluded.modality,
-            primary_muscles=excluded.primary_muscles,
-            notes=excluded.notes
-    """, (name, movement_pattern, laterality, modality, primary_muscles, notes))
-    conn.commit()
-    cur.execute("SELECT id FROM exercises WHERE name = ?", (name,))
-    ex_id = cur.fetchone()[0]
-    conn.close()
-    return ex_id
-
-def upsert_rep_scheme(goal: str, phase: Optional[str],
-                      reps_min: int, reps_max: int,
-                      sets_min: int, sets_max: int,
-                      pct_1rm_min: Optional[float], pct_1rm_max: Optional[float],
-                      rpe_min: Optional[float], rpe_max: Optional[float],
-                      rest_sec_min: Optional[int], rest_sec_max: Optional[int],
-                      intent: Optional[str]):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO rep_schemes(goal, phase, reps_min, reps_max, sets_min, sets_max,
-                               pct_1rm_min, pct_1rm_max, rpe_min, rpe_max,
-                               rest_sec_min, rest_sec_max, intent)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (goal, phase, reps_min, reps_max, sets_min, sets_max,
-          pct_1rm_min, pct_1rm_max, rpe_min, rpe_max,
-          rest_sec_min, rest_sec_max, intent))
-    conn.commit()
-    conn.close()
-
-def list_rep_schemes(goal: Optional[str] = None):
-    conn = get_conn()
-    cur = conn.cursor()
-    if goal:
-        cur.execute("""
-            SELECT id, goal, phase, reps_min, reps_max, sets_min, sets_max,
-                   pct_1rm_min, pct_1rm_max, rpe_min, rpe_max, rest_sec_min, rest_sec_max, intent
-            FROM rep_schemes
-            WHERE goal = ?
-            ORDER BY goal, phase, reps_min
-        """, (goal,))
-    else:
-        cur.execute("""
-            SELECT id, goal, phase, reps_min, reps_max, sets_min, sets_max,
-                   pct_1rm_min, pct_1rm_max, rpe_min, rpe_max, rest_sec_min, rest_sec_max, intent
-            FROM rep_schemes
-            ORDER BY goal, phase, reps_min
-        """)
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def upsert_norm_standard(exercise_id: int, sex: str, age_min: int, age_max: int, metric: str,
-                         poor: Optional[float], fair: Optional[float], good: Optional[float], excellent: Optional[float],
-                         source: Optional[str] = None, notes: Optional[str] = None):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    # Replace row for uniqueness (exercise_id, sex, age_min, age_max, metric)
-    cur.execute("""
-        DELETE FROM norm_strength_standards
-        WHERE exercise_id = ? AND sex = ? AND age_min = ? AND age_max = ? AND metric = ?
-    """, (exercise_id, sex, age_min, age_max, metric))
-
-    cur.execute("""
-        INSERT INTO norm_strength_standards(exercise_id, sex, age_min, age_max, metric,
-                                            poor, fair, good, excellent, source, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (exercise_id, sex, age_min, age_max, metric,
-          poor, fair, good, excellent, source, notes))
-
-    conn.commit()
-    conn.close()
 
 def get_norm_standard(exercise_id: int, sex: str, age: int, metric: str):
+    """
+    Returns:
+      poor, fair, good, excellent, source, notes, age_min, age_max
+    or None if not found
+    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT poor, fair, good, excellent, source, notes, age_min, age_max
         FROM norm_strength_standards
-        WHERE exercise_id = ? AND sex = ? AND metric = ?
-          AND age_min <= ? AND age_max >= ?
+        WHERE exercise_id = ?
+          AND sex = ?
+          AND metric = ?
+          AND age_min <= ?
+          AND age_max >= ?
         ORDER BY age_min DESC
         LIMIT 1
-    """, (exercise_id, sex, metric, age, age))
+    """, (int(exercise_id), sex, metric, int(age), int(age)))
     row = cur.fetchone()
     conn.close()
     return row
 
-def upsert_patient_profile(patient_id: int, sex: Optional[str], dob: Optional[str], bodyweight_kg: Optional[float]):
+
+# -----------------------------
+# Patient profile (sex/dob/BW/level)
+# -----------------------------
+def upsert_patient_profile(
+    patient_id: int,
+    sex: Optional[str],
+    dob: Optional[str],
+    bodyweight_kg: Optional[float],
+    presumed_level: Optional[str],
+) -> None:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO patients_profile(patient_id, sex, dob, bodyweight_kg)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO patient_profile(patient_id, sex, dob, bodyweight_kg, presumed_level)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(patient_id) DO UPDATE SET
             sex=excluded.sex,
             dob=excluded.dob,
             bodyweight_kg=excluded.bodyweight_kg,
+            presumed_level=excluded.presumed_level,
             updated_at=datetime('now')
-    """, (patient_id, sex, dob, bodyweight_kg))
+    """, (int(patient_id), sex, dob, bodyweight_kg, presumed_level))
     conn.commit()
     conn.close()
+
 
 def get_patient_profile(patient_id: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT sex, dob, bodyweight_kg
-        FROM patients_profile
+        SELECT sex, dob, bodyweight_kg, presumed_level
+        FROM patient_profile
         WHERE patient_id = ?
-    """, (patient_id,))
+    """, (int(patient_id),))
+    row = cur.fetchone()
+    conn.close()
+    return row  # None or (sex, dob, bodyweight_kg, presumed_level)
+
+
+# -----------------------------
+# Strength estimates (auto-estimated e1RM audit)
+# -----------------------------
+def upsert_strength_estimate(
+    patient_id: int,
+    exercise_id: int,
+    as_of_date: str,
+    estimated_1rm_kg: Optional[float],
+    estimated_rel_1rm_bw: Optional[float],
+    level_used: str,
+    sex_used: str,
+    age_used: int,
+    bw_used: Optional[float],
+    method: str,
+    notes: Optional[str] = None,
+) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO strength_estimates(
+            patient_id, exercise_id, as_of_date,
+            estimated_1rm_kg, estimated_rel_1rm_bw,
+            level_used, sex_used, age_used, bw_used,
+            method, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(patient_id, exercise_id) DO UPDATE SET
+            as_of_date=excluded.as_of_date,
+            estimated_1rm_kg=excluded.estimated_1rm_kg,
+            estimated_rel_1rm_bw=excluded.estimated_rel_1rm_bw,
+            level_used=excluded.level_used,
+            sex_used=excluded.sex_used,
+            age_used=excluded.age_used,
+            bw_used=excluded.bw_used,
+            method=excluded.method,
+            notes=excluded.notes,
+            updated_at=datetime('now')
+    """, (
+        int(patient_id), int(exercise_id), as_of_date,
+        estimated_1rm_kg, estimated_rel_1rm_bw,
+        level_used, sex_used, int(age_used), bw_used,
+        method, notes
+    ))
+    conn.commit()
+    conn.close()
+
+
+def get_strength_estimate(patient_id: int, exercise_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT as_of_date, estimated_1rm_kg, estimated_rel_1rm_bw,
+               level_used, sex_used, age_used, bw_used, method, notes
+        FROM strength_estimates
+        WHERE patient_id = ? AND exercise_id = ?
+    """, (int(patient_id), int(exercise_id)))
     row = cur.fetchone()
     conn.close()
     return row
 
-def insert_strength_test(patient_id: int, exercise_id: int, test_date: str,
-                         estimated_1rm_kg: Optional[float],
-                         reps: Optional[int],
-                         load_kg: Optional[float],
-                         side: Optional[str],
-                         notes: Optional[str]):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO patient_strength_tests(patient_id, exercise_id, test_date, estimated_1rm_kg, reps, load_kg, side, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (patient_id, exercise_id, test_date, estimated_1rm_kg, reps, load_kg, side, notes))
-    conn.commit()
-    conn.close()
 
-def list_strength_tests(patient_id: int, exercise_id: Optional[int] = None):
-    conn = get_conn()
-    cur = conn.cursor()
-    if exercise_id:
-        cur.execute("""
-            SELECT test_date, estimated_1rm_kg, reps, load_kg, side, notes
-            FROM patient_strength_tests
-            WHERE patient_id = ? AND exercise_id = ?
-            ORDER BY test_date DESC
-        """, (patient_id, exercise_id))
+# -----------------------------
+# Estimation engine helpers (Option A anchor scaling)
+# These are pure helpers you can call from app.py
+# -----------------------------
+def _level_to_target_ratio(poor: float, fair: float, good: float, excellent: float, level: str) -> float:
+    level = (level or "intermediate").lower()
+    if level == "novice":
+        return float(fair)
+    if level == "intermediate":
+        return (float(fair) + float(good)) / 2.0
+    if level == "advanced":
+        return float(good)
+    if level == "expert":
+        return (float(good) + float(excellent)) / 2.0
+    return (float(fair) + float(good)) / 2.0
+
+
+def estimate_e1rm_kg_for_exercise(
+    patient_sex: str,
+    patient_age: int,
+    patient_bw_kg: Optional[float],
+    presumed_level: str,
+    exercise_id: int,
+    metric: str,
+):
+    """
+    Returns dict:
+      estimated_1rm_kg, estimated_rel_1rm_bw, method, notes, band_used
+    """
+    if metric == "pullup_reps":
+        return {
+            "estimated_1rm_kg": None,
+            "estimated_rel_1rm_bw": None,
+            "method": "not_applicable_pullup",
+            "notes": "Pull-ups prescribed via reps/sets; no 1RM estimate.",
+            "band_used": None,
+        }
+
+    if not patient_bw_kg or patient_bw_kg <= 0:
+        return {
+            "estimated_1rm_kg": None,
+            "estimated_rel_1rm_bw": None,
+            "method": "missing_bodyweight",
+            "notes": "Bodyweight is required to estimate 1RM from relative norms.",
+            "band_used": None,
+        }
+
+    norm = get_norm_standard(exercise_id, patient_sex, int(patient_age), metric)
+    if norm is None:
+        return {
+            "estimated_1rm_kg": None,
+            "estimated_rel_1rm_bw": None,
+            "method": "no_norm_found",
+            "notes": "No normative standard found for this exercise/sex/age/metric.",
+            "band_used": None,
+        }
+
+    poor, fair, good, excellent, source, notes, age_min, age_max = norm
+    target_rel = _level_to_target_ratio(poor, fair, good, excellent, presumed_level)
+    e1rm = float(target_rel) * float(patient_bw_kg)
+
+    return {
+        "estimated_1rm_kg": float(e1rm),
+        "estimated_rel_1rm_bw": float(target_rel),
+        "method": "norm_level_band_v1",
+        "notes": f"Norms: {source or ''} {notes or ''}".strip(),
+        "band_used": f"{age_min}-{age_max}",
+    }
+
+
+def estimate_unilateral_from_bilateral(
+    bilateral_e1rm_kg: Optional[float],
+    movement: str,
+    presumed_level: str,
+) -> Optional[float]:
+    """
+    Option A scaling rules:
+      - 'bss'/'stepup' anchored to squat e1RM
+      - 'sl_rdl' anchored to deadlift e1RM
+    Returns per-leg 'e1RM-equivalent' used for % prescriptions.
+    """
+    if bilateral_e1rm_kg is None:
+        return None
+
+    lvl = (presumed_level or "intermediate").lower()
+    mv = (movement or "").lower().strip()
+
+    if mv in ["bss", "stepup"]:
+        base = 0.40
+        if lvl == "novice":
+            base = 0.35
+        elif lvl == "advanced":
+            base = 0.45
+        elif lvl == "expert":
+            base = 0.50
+    elif mv in ["sl_rdl"]:
+        base = 0.35
+        if lvl == "novice":
+            base = 0.30
+        elif lvl == "advanced":
+            base = 0.40
+        elif lvl == "expert":
+            base = 0.45
     else:
-        cur.execute("""
-            SELECT exercise_id, test_date, estimated_1rm_kg, reps, load_kg, side, notes
-            FROM patient_strength_tests
-            WHERE patient_id = ?
-            ORDER BY test_date DESC
-        """, (patient_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+        base = 0.35
+
+    return float(bilateral_e1rm_kg) * float(base)
