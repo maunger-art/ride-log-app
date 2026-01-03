@@ -24,6 +24,15 @@ from db_store import (
     upsert_patient_profile,
     get_patient_profile,
     insert_strength_test,
+    upsert_patient_profile,
+    get_patient_profile,
+    list_exercises,
+    list_rep_schemes,
+    count_norm_rows,
+    estimate_e1rm_kg_for_exercise,
+    estimate_unilateral_from_bilateral,
+    upsert_strength_estimate,
+    get_strength_estimate,
 )
 
 from plan import parse_plan_csv, rides_to_weekly_summary, to_monday
