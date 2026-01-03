@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 from datetime import date, datetime
+from datetime import timedelta
 from typing import Optional
 
 from db_store import (
@@ -380,8 +381,11 @@ with tab3:
 # -------------------------------------------------------------------
 
 with tab4:
-    st.subheader("S&C Planning (MVP)")
+    st.subheader("S&C Planning")
 
+    # ---------------------------------------------------------
+    # Norms status
+    # ---------------------------------------------------------
     st.caption(f"Strength standards rows: {count_norm_rows()}")
     if count_norm_rows() == 0:
         st.warning(
@@ -392,16 +396,16 @@ with tab4:
 
     st.divider()
 
-    # -----------------------------
+    # ---------------------------------------------------------
     # Patient profile (sex / DOB or age / BW / presumed level)
-    # -----------------------------
+    # ---------------------------------------------------------
     st.subheader("Patient profile (drives auto-estimates)")
 
     profile = get_patient_profile(pid)
     sex_default = profile[0] if profile else None
     dob_default = profile[1] if profile else ""
     bw_default = profile[2] if profile else None
-    level_default = profile[3] if (profile and len(profile) > 3) else "intermediate"
+    level_default = profile[3] if (profile and len(profile) > 3 and profile[3]) else "intermediate"
 
     level_options = ["novice", "intermediate", "advanced", "expert"]
     if level_default not in level_options:
@@ -460,9 +464,9 @@ with tab4:
 
     st.divider()
 
-    # -----------------------------
+    # ---------------------------------------------------------
     # Age handling
-    # -----------------------------
+    # ---------------------------------------------------------
     st.subheader("Age (for selecting the correct norm band)")
     age_manual = st.number_input(
         "Age (years) – used if DOB blank/invalid",
@@ -483,14 +487,13 @@ with tab4:
         return int(manual_age)
 
     age_years = _age_from_dob_or_manual(dob, int(age_manual))
-
     st.caption(f"Age used for norms: {age_years} years | Level used: {presumed_level}")
 
     st.divider()
 
-    # -----------------------------
+    # ---------------------------------------------------------
     # Exercise selection + Auto-estimated e1RM
-    # -----------------------------
+    # ---------------------------------------------------------
     st.subheader("Auto-estimated e1RM (from norms + level + BW)")
 
     exercises = list_exercises()
@@ -504,7 +507,6 @@ with tab4:
     ex_id = ex_name_map[selected_ex]
 
     metric = "pullup_reps" if selected_ex.lower().startswith(("pull-up", "pullup")) else "rel_1rm_bw"
-
     bw_use = float(bodyweight_kg) if (bodyweight_kg and bodyweight_kg > 0) else None
 
     est = estimate_e1rm_kg_for_exercise(
@@ -547,12 +549,12 @@ with tab4:
 
     st.divider()
 
-    # -----------------------------
+    # ---------------------------------------------------------
     # Unilateral anchor preview (Option A)
-    # -----------------------------
+    # ---------------------------------------------------------
     st.subheader("Unilateral anchor preview (Option A)")
+    st.caption("Unilateral 'e1RM-equivalent' estimated by scaling the parent bilateral lift.")
 
-    st.caption("If you select a unilateral lift, we estimate its 'e1RM-equivalent' by scaling the parent bilateral lift.")
     uni_choice = st.selectbox(
         "Unilateral movement to preview",
         options=["(none)", "Bulgarian Split Squat (from Squat)", "Step-Up (from Squat)", "Single-Leg RDL (from Deadlift)"],
@@ -560,7 +562,6 @@ with tab4:
     )
 
     def _get_parent_e1rm(parent_name: str) -> Optional[float]:
-        # Estimate parent bilateral e1RM on the fly (no need to have saved estimate)
         parent_id = ex_name_map.get(parent_name)
         if not parent_id:
             return None
@@ -598,9 +599,9 @@ with tab4:
 
     st.divider()
 
-    # -----------------------------
+    # ---------------------------------------------------------
     # Prescription builder from rep schemes (uses auto e1RM)
-    # -----------------------------
+    # ---------------------------------------------------------
     st.subheader("Prescription builder (from rep schemes)")
 
     goal = st.selectbox("Adaptation goal", options=["endurance", "hypertrophy", "strength", "power"], index=0, key="sc_goal")
@@ -610,8 +611,7 @@ with tab4:
         st.warning("No rep schemes found for this goal. Seed rep schemes first.")
         st.stop()
 
-    # pick first scheme (MVP); later you can add scheme selector
-    s = schemes[0]
+    s = schemes[0]  # MVP: first scheme
     _, s_goal, s_phase, reps_min, reps_max, sets_min, sets_max, pct_min, pct_max, rpe_min, rpe_max, rest_min, rest_max, intent = s
 
     st.markdown(f"**Scheme:** {s_goal} ({s_phase if s_phase else 'default'})")
@@ -634,7 +634,7 @@ with tab4:
         if est["estimated_1rm_kg"] is None or pct_min is None or pct_max is None:
             st.info("Missing e1RM estimate or %1RM range. Ensure BW is set and norms exist.")
         else:
-            # Safety cap for week-1 style suggestions (conservative default)
+            # Conservative cap for early prescribing
             cap_max = 0.70 if goal in ["strength"] else 0.75
             pct_min_safe = float(pct_min)
             pct_max_safe = min(float(pct_max), cap_max)
@@ -642,26 +642,185 @@ with tab4:
             w_min = float(est["estimated_1rm_kg"]) * pct_min_safe
             w_max = float(est["estimated_1rm_kg"]) * pct_max_safe
             st.info(f"Suggested working load range (capped): **{w_min:.1f}–{w_max:.1f} kg**")
-            st.caption("Cap applied to keep early prescribing conservative; the 6-week block will progress loads week-to-week.")
+            st.caption("Cap keeps early prescribing conservative; 6-week blocks will progress loads week-to-week.")
 
     st.divider()
 
-    # -----------------------------
+    # ---------------------------------------------------------
     # Show saved estimate (if exists) for the selected exercise
-    # -----------------------------
+    # ---------------------------------------------------------
     st.subheader("Saved estimate (if previously stored)")
     saved = get_strength_estimate(pid, ex_id)
     if saved is None:
         st.caption("No saved estimate for this exercise yet.")
     else:
         as_of_date, e1rm_kg, rel_bw, lvl_used, sex_used, age_used, bw_used, method, notes = saved
+        st.write(f"- As of: **{as_of_date}**")
         if e1rm_kg is not None:
-            st.write(f"- As of: **{as_of_date}**")
             st.write(f"- e1RM: **{float(e1rm_kg):.1f} kg** (rel: {float(rel_bw):.2f}×BW)")
-            st.write(f"- Inputs: sex={sex_used}, age={age_used}, bw={bw_used}, level={lvl_used}")
-            st.caption(f"Method: {method} | Notes: {notes}")
         else:
-            st.write(f"- As of: **{as_of_date}**")
             st.write("- e1RM: **n/a** (exercise uses reps/sets rather than 1RM)")
-            st.write(f"- Inputs: sex={sex_used}, age={age_used}, bw={bw_used}, level={lvl_used}")
-            st.caption(f"Method: {method} | Notes: {notes}")
+        st.write(f"- Inputs: sex={sex_used}, age={age_used}, bw={bw_used}, level={lvl_used}")
+        st.caption(f"Method: {method} | Notes: {notes}")
+
+    # =========================================================
+    # S&C Programming: 6-week blocks (meso) + sessions + exercises
+    # =========================================================
+    st.divider()
+    st.subheader("6-week block generator (Hybrid / Week 4 Deload / 2 sessions)")
+
+    # Helper: Monday
+    def _to_monday(d: date) -> date:
+        return d - timedelta(days=d.weekday())
+
+    # Build exercise lookup
+    ex_id_by_name = {row[1]: row[0] for row in exercises}
+
+    # These must exist in your Exercises table (seed them if missing)
+    REQUIRED = [
+        "Bike Erg (High Seat)",
+        "Wall Sit",
+        "Isometric Single-Leg Hamstring Bridge",
+        "Isometric Split Squat",
+        "Side Plank",
+        "Hip Abduction (Band, Seated)",
+        "Single-Leg RDL",
+    ]
+
+    missing = [n for n in REQUIRED if n not in ex_id_by_name]
+    if missing:
+        st.warning(
+            "Missing exercises required for the template: "
+            + ", ".join(missing)
+            + ". Add them in seed_strength_standards.py via upsert_exercise, then reseed."
+        )
+
+    colg1, colg2, colg3 = st.columns(3)
+    with colg1:
+        block_start = st.date_input("Block start (Monday recommended)", value=_to_monday(date.today()), key="sc_block_start")
+    with colg2:
+        sessions_pw = st.selectbox("Sessions / week", options=[1, 2], index=1, key="sc_sessions_pw")
+    with colg3:
+        deload_week = st.selectbox("Deload week", options=[3, 4, 5], index=1, key="sc_deload_week")
+
+    block_goal = st.selectbox("Block goal", options=["hybrid", "endurance", "hypertrophy", "strength", "power"], index=0, key="sc_block_goal")
+    block_notes = st.text_area("Block notes (optional)", height=70, key="sc_block_notes")
+
+    # Simple template writer (store bike work as minutes in reps field)
+    def _seed_xmas_template(session_id: int, is_deload: bool) -> None:
+        clear_sc_session_exercises(session_id)
+        set_factor = 0.6 if is_deload else 1.0
+
+        bike = ex_id_by_name.get("Bike Erg (High Seat)")
+        wall = ex_id_by_name.get("Wall Sit")
+        ham = ex_id_by_name.get("Isometric Single-Leg Hamstring Bridge")
+        split = ex_id_by_name.get("Isometric Split Squat")
+        plank = ex_id_by_name.get("Side Plank")
+        abd = ex_id_by_name.get("Hip Abduction (Band, Seated)")
+        slrdl = ex_id_by_name.get("Single-Leg RDL")
+
+        if not all([bike, wall, ham, split, plank, abd, slrdl]):
+            return  # missing required exercises
+
+        # Warm-up / between / cooldown (MVP: reps=minutes)
+        add_sc_session_exercise(session_id, bike, sets=1, reps=5, pct_1rm=None, load_kg=None,
+                                rpe_target=3 if is_deload else 4, rest_sec=None,
+                                intent="Easy spin", notes="Warm-up 5 min")
+
+        # Superset A
+        add_sc_session_exercise(session_id, wall, sets=int(round(3 * set_factor)), reps=40, pct_1rm=None, load_kg=None,
+                                rpe_target=6 if not is_deload else 5, rest_sec=45, intent="Isometric hold", notes="Seconds")
+        add_sc_session_exercise(session_id, ham, sets=int(round(3 * set_factor)), reps=30, pct_1rm=None, load_kg=None,
+                                rpe_target=6 if not is_deload else 5, rest_sec=45, intent="Isometric hold", notes="Seconds")
+
+        add_sc_session_exercise(session_id, bike, sets=1, reps=3, pct_1rm=None, load_kg=None,
+                                rpe_target=3 if is_deload else 4, rest_sec=None,
+                                intent="Easy spin", notes="3 min between sets")
+
+        # Superset B
+        add_sc_session_exercise(session_id, split, sets=int(round(3 * set_factor)), reps=30, pct_1rm=None, load_kg=None,
+                                rpe_target=7 if not is_deload else 5, rest_sec=60, intent="Isometric hold", notes="Seconds (KB optional)")
+        add_sc_session_exercise(session_id, plank, sets=int(round(3 * set_factor)), reps=30, pct_1rm=None, load_kg=None,
+                                rpe_target=6 if not is_deload else 5, rest_sec=60, intent="Isometric hold", notes="Seconds")
+
+        add_sc_session_exercise(session_id, bike, sets=1, reps=3, pct_1rm=None, load_kg=None,
+                                rpe_target=3 if is_deload else 4, rest_sec=None,
+                                intent="Easy spin", notes="3 min between sets")
+
+        # Superset C
+        add_sc_session_exercise(session_id, abd, sets=int(round(3 * set_factor)), reps=10, pct_1rm=None, load_kg=None,
+                                rpe_target=6 if not is_deload else 5, rest_sec=60, intent="Controlled", notes="Band: medium-firm")
+        add_sc_session_exercise(session_id, slrdl, sets=int(round(3 * set_factor)), reps=10, pct_1rm=None, load_kg=None,
+                                rpe_target=7 if not is_deload else 5, rest_sec=60, intent="Controlled", notes="DB optional")
+
+        add_sc_session_exercise(session_id, bike, sets=1, reps=10, pct_1rm=None, load_kg=None,
+                                rpe_target=3 if is_deload else 4, rest_sec=None,
+                                intent="Easy spin", notes="Cool down 10 min")
+
+    if st.button("Generate 6-week block", key="gen_sc_block"):
+        if missing:
+            st.error("Cannot generate: add missing exercises first (see warning above).")
+            st.stop()
+
+        block_id = create_sc_block(
+            patient_id=pid,
+            start_date=block_start.isoformat(),
+            goal=block_goal,
+            notes=block_notes.strip() if block_notes else None,
+            weeks=6,
+            model="hybrid_v1",
+            deload_week=int(deload_week),
+            sessions_per_week=int(sessions_pw),
+        )
+
+        for wk in range(1, 7):
+            wk_start = (block_start + timedelta(days=(wk - 1) * 7)).isoformat()
+            is_deload = (wk == int(deload_week))
+            focus = "deload" if is_deload else "hybrid"
+
+            week_id = upsert_sc_week(
+                block_id=block_id,
+                week_no=wk,
+                week_start=wk_start,
+                focus=focus,
+                deload_flag=is_deload,
+                notes=None,
+            )
+
+            sA = upsert_sc_session(week_id=week_id, session_label="A", day_hint="Tue", notes=None)
+            _seed_xmas_template(sA, is_deload=is_deload)
+
+            if int(sessions_pw) == 2:
+                sB = upsert_sc_session(week_id=week_id, session_label="B", day_hint="Thu", notes=None)
+                _seed_xmas_template(sB, is_deload=is_deload)
+
+        st.success("6-week block created.")
+        st.rerun()
+
+    st.divider()
+    st.subheader("Latest saved block")
+
+    latest = fetch_latest_sc_block(pid)
+    if latest is None:
+        st.info("No block created yet.")
+    else:
+        block_id, b_start, b_weeks, b_model, b_deload, b_spw, b_goal, b_notes, b_created = latest
+        st.write(f"Block **{block_id}** | Start **{b_start}** | Model **{b_model}** | Deload week **{b_deload}** | Sessions/week **{b_spw}** | Goal **{b_goal}**")
+        if b_notes:
+            st.caption(f"Notes: {b_notes}")
+
+        detail = fetch_sc_block_detail(block_id)
+        if not detail:
+            st.warning("Block exists but has no detail (weeks/sessions).")
+        else:
+            for week_no, week_start_str, focus, is_deload, label, day_hint, exs in detail:
+                st.markdown(f"### Week {week_no} ({week_start_str}) — {focus}{' (DELOAD)' if is_deload else ''}")
+                st.markdown(f"**Session {label}** ({day_hint or 'day TBD'})")
+                if not exs:
+                    st.info("No exercises in this session yet.")
+                else:
+                    df = pd.DataFrame(
+                        exs,
+                        columns=["exercise", "sets", "reps", "pct_1rm", "load_kg", "rpe", "rest_sec", "intent", "notes"]
+                    )
+                    st.dataframe(df, use_container_width=True)
