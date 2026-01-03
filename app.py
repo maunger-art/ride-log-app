@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 from datetime import date, datetime
+from typing import Optional
 
 from db_store import (
     init_db,
