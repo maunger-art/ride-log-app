@@ -377,212 +377,290 @@ with tab3:
 # -------------------------------------------------------------------
 # TAB 4: S&C Planning (MVP)
 # -------------------------------------------------------------------
+
 with tab4:
     st.subheader("S&C Planning (MVP)")
 
-    # --- Quick status / seeding helper ---
     st.caption(f"Strength standards rows: {count_norm_rows()}")
-
     if count_norm_rows() == 0:
         st.warning(
             "Strength standards are not seeded yet. "
             "Add seed_strength_standards.py to the repo root and run 'Seed strength DB' from the sidebar."
         )
+        st.stop()
 
     st.divider()
 
-    # --- Patient profile (needed for age/sex/BW comparisons) ---
-    st.subheader("Patient profile")
+    # -----------------------------
+    # Patient profile (sex / DOB or age / BW / presumed level)
+    # -----------------------------
+    st.subheader("Patient profile (drives auto-estimates)")
 
     profile = get_patient_profile(pid)
     sex_default = profile[0] if profile else None
-    dob_default = profile[1] if profile else None
+    dob_default = profile[1] if profile else ""
     bw_default = profile[2] if profile else None
+    level_default = profile[3] if (profile and len(profile) > 3) else "intermediate"
 
-    colp1, colp2, colp3 = st.columns(3)
+    level_options = ["novice", "intermediate", "advanced", "expert"]
+    if level_default not in level_options:
+        level_default = "intermediate"
+
+    colp1, colp2, colp3, colp4 = st.columns(4)
+
     with colp1:
         sex = st.selectbox(
             "Sex",
             options=["", "male", "female"],
             index=(["", "male", "female"].index(sex_default) if sex_default in ["male", "female"] else 0),
+            key="profile_sex",
         )
+
     with colp2:
         dob = st.text_input(
-            "Date of birth (YYYY-MM-DD) – optional",
+            "DOB (YYYY-MM-DD) – optional",
             value=(dob_default if dob_default else ""),
-            help="If you don’t want DOB stored, leave blank and enter age below when needed.",
+            help="Leave blank if you do not want DOB stored; use Age below instead.",
+            key="profile_dob",
         )
+
     with colp3:
         bodyweight_kg = st.number_input(
             "Bodyweight (kg)",
             min_value=0.0,
             step=0.1,
             value=(float(bw_default) if bw_default is not None else 0.0),
+            key="profile_bw",
         )
 
-    if st.button("Save profile"):
-        upsert_patient_profile(pid, sex if sex else None, dob.strip() if dob else None, bodyweight_kg if bodyweight_kg > 0 else None)
+    with colp4:
+        presumed_level = st.selectbox(
+            "Presumed strength level",
+            options=level_options,
+            index=level_options.index(level_default),
+            help="Used to estimate starting e1RM from your seeded norms (no 1RM input required).",
+            key="profile_level",
+        )
+
+    if st.button("Save profile", key="save_profile_tab4"):
+        upsert_patient_profile(
+            pid,
+            sex if sex else None,
+            dob.strip() if dob else None,
+            float(bodyweight_kg) if bodyweight_kg and bodyweight_kg > 0 else None,
+            presumed_level,
+        )
         st.success("Profile saved.")
         st.rerun()
 
+    if not sex:
+        st.info("Select sex and save the profile to enable strength estimates.")
+        st.stop()
+
     st.divider()
 
-    # --- Exercise selection ---
-    st.subheader("Strength benchmark + prescription")
+    # -----------------------------
+    # Age handling
+    # -----------------------------
+    st.subheader("Age (for selecting the correct norm band)")
+    age_manual = st.number_input(
+        "Age (years) – used if DOB blank/invalid",
+        min_value=18,
+        max_value=65,
+        value=35,
+        key="age_manual_tab4",
+    )
+
+    def _age_from_dob_or_manual(dob_str: str, manual_age: int) -> int:
+        if dob_str and dob_str.strip():
+            try:
+                dob_dt = datetime.strptime(dob_str.strip(), "%Y-%m-%d").date()
+                today = date.today()
+                return today.year - dob_dt.year - ((today.month, today.day) < (dob_dt.month, dob_dt.day))
+            except Exception:
+                return int(manual_age)
+        return int(manual_age)
+
+    age_years = _age_from_dob_or_manual(dob, int(age_manual))
+
+    st.caption(f"Age used for norms: {age_years} years | Level used: {presumed_level}")
+
+    st.divider()
+
+    # -----------------------------
+    # Exercise selection + Auto-estimated e1RM
+    # -----------------------------
+    st.subheader("Auto-estimated e1RM (from norms + level + BW)")
 
     exercises = list_exercises()
     if not exercises:
-        st.info("No exercises found in the database yet. Seed the DB, or add exercises manually via a seed script.")
+        st.warning("No exercises found. Seed the DB (exercises + norms) first.")
         st.stop()
 
     ex_name_map = {row[1]: row[0] for row in exercises}  # name -> id
-    ex_names = list(ex_name_map.keys())
-    selected_ex = st.selectbox("Select exercise", options=ex_names)
+    ex_names = sorted(list(ex_name_map.keys()))
+    selected_ex = st.selectbox("Select exercise", options=ex_names, key="sc_ex_select")
     ex_id = ex_name_map[selected_ex]
 
-    # Metric: pull-ups are reps; everything else uses rel_1rm_bw
-    metric = "pullup_reps" if selected_ex.lower().startswith("pull-up") or selected_ex.lower().startswith("pullup") else "rel_1rm_bw"
+    metric = "pullup_reps" if selected_ex.lower().startswith(("pull-up", "pullup")) else "rel_1rm_bw"
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if metric == "pullup_reps":
-            test_value = st.number_input("Test result (strict reps)", min_value=0, step=1, value=0)
-        else:
-            test_value = st.number_input("Estimated 1RM (kg)", min_value=0.0, step=2.5, value=0.0)
+    bw_use = float(bodyweight_kg) if (bodyweight_kg and bodyweight_kg > 0) else None
 
-    with col2:
-        # If DOB not provided, allow manual age entry for benchmarks
-        age_manual = st.number_input("Age (years) – used if DOB blank", min_value=18, max_value=65, value=35)
+    est = estimate_e1rm_kg_for_exercise(
+        patient_sex=sex,
+        patient_age=int(age_years),
+        patient_bw_kg=bw_use,
+        presumed_level=presumed_level,
+        exercise_id=ex_id,
+        metric=metric,
+    )
 
-    # Compute age
-    age_years = None
-    if dob and dob.strip():
-        try:
-            dob_dt = datetime.strptime(dob.strip(), "%Y-%m-%d").date()
-            today = date.today()
-            age_years = today.year - dob_dt.year - ((today.month, today.day) < (dob_dt.month, dob_dt.day))
-        except Exception:
-            age_years = int(age_manual)
-            st.warning("DOB format invalid. Using manual age.")
+    if metric == "pullup_reps":
+        st.info("Pull-ups are prescribed via reps/sets and intent (no 1RM estimate).")
     else:
-        age_years = int(age_manual)
-
-    # Compute relative strength if applicable
-    rel_strength = None
-    if metric == "rel_1rm_bw":
-        if bodyweight_kg and bodyweight_kg > 0 and test_value and test_value > 0:
-            rel_strength = float(test_value) / float(bodyweight_kg)
-
-    # Pull benchmark row
-    if not sex:
-        st.info("Select sex above to enable benchmarking.")
-        st.stop()
-
-    bench = get_norm_standard(ex_id, sex, age_years, metric)
-
-    if bench is None:
-        st.warning("No benchmark found for this exercise/sex/age/metric. (Seed may be missing or incomplete.)")
-    else:
-        poor, fair, good, excellent, source, notes, age_min, age_max = bench
-
-        st.markdown(
-            f"**Benchmark band used:** {sex}, ages {age_min}–{age_max}, metric `{metric}`"
-        )
-        if source:
-            st.caption(f"Source: {source}")
-        if notes:
-            st.caption(f"Notes: {notes}")
-
-        # Determine category
-        category = None
-        if metric == "pullup_reps":
-            v = int(test_value)
-            if excellent is not None and v >= excellent:
-                category = "Excellent"
-            elif good is not None and v >= good:
-                category = "Good"
-            elif fair is not None and v >= fair:
-                category = "Fair"
-            else:
-                category = "Poor"
-            st.metric("Result", f"{v} reps", help="Strict pull-ups")
+        if est["estimated_1rm_kg"] is None:
+            st.warning(est["notes"])
         else:
-            if rel_strength is None:
-                st.info("Enter a bodyweight and 1RM to compute relative strength.")
-            else:
-                v = rel_strength
-                if excellent is not None and v >= excellent:
-                    category = "Excellent"
-                elif good is not None and v >= good:
-                    category = "Good"
-                elif fair is not None and v >= fair:
-                    category = "Fair"
-                else:
-                    category = "Poor"
-                st.metric("Relative strength", f"{v:.2f} x BW")
+            st.metric("Estimated 1RM (auto)", f"{est['estimated_1rm_kg']:.1f} kg")
+            st.caption(
+                f"Rel strength used: {est['estimated_rel_1rm_bw']:.2f} × BW | "
+                f"Age band: {est['band_used']} | Method: {est['method']}"
+            )
 
-        if category:
-            st.success(f"Classification: **{category}**")
+            if st.button("Save estimate", key="save_estimate_btn"):
+                upsert_strength_estimate(
+                    patient_id=pid,
+                    exercise_id=ex_id,
+                    as_of_date=date.today().isoformat(),
+                    estimated_1rm_kg=float(est["estimated_1rm_kg"]),
+                    estimated_rel_1rm_bw=float(est["estimated_rel_1rm_bw"]),
+                    level_used=presumed_level,
+                    sex_used=sex,
+                    age_used=int(age_years),
+                    bw_used=bw_use,
+                    method=est["method"],
+                    notes=est["notes"],
+                )
+                st.success("Estimate saved.")
+                st.rerun()
 
     st.divider()
 
-    # --- Prescription from rep schemes ---
-    st.subheader("Prescription builder")
+    # -----------------------------
+    # Unilateral anchor preview (Option A)
+    # -----------------------------
+    st.subheader("Unilateral anchor preview (Option A)")
 
-    goal = st.selectbox("Adaptation goal", options=["endurance", "hypertrophy", "strength", "power"], index=0)
+    st.caption("If you select a unilateral lift, we estimate its 'e1RM-equivalent' by scaling the parent bilateral lift.")
+    uni_choice = st.selectbox(
+        "Unilateral movement to preview",
+        options=["(none)", "Bulgarian Split Squat (from Squat)", "Step-Up (from Squat)", "Single-Leg RDL (from Deadlift)"],
+        key="uni_preview_choice",
+    )
+
+    def _get_parent_e1rm(parent_name: str) -> Optional[float]:
+        # Estimate parent bilateral e1RM on the fly (no need to have saved estimate)
+        parent_id = ex_name_map.get(parent_name)
+        if not parent_id:
+            return None
+        parent_est = estimate_e1rm_kg_for_exercise(
+            patient_sex=sex,
+            patient_age=int(age_years),
+            patient_bw_kg=bw_use,
+            presumed_level=presumed_level,
+            exercise_id=parent_id,
+            metric="rel_1rm_bw",
+        )
+        return parent_est.get("estimated_1rm_kg")
+
+    if uni_choice != "(none)":
+        if bw_use is None:
+            st.warning("Enter bodyweight and save the profile to preview unilateral estimates.")
+        else:
+            if "Bulgarian" in uni_choice or "Step-Up" in uni_choice:
+                parent_e1rm = _get_parent_e1rm("Back Squat")
+                movement_key = "bss" if "Bulgarian" in uni_choice else "stepup"
+                if parent_e1rm is None:
+                    st.warning("Could not estimate parent lift (Back Squat). Ensure it exists in Exercises.")
+                else:
+                    uni_e1rm_eq = estimate_unilateral_from_bilateral(parent_e1rm, movement_key, presumed_level)
+                    st.metric("Unilateral e1RM-equivalent (per leg)", f"{uni_e1rm_eq:.1f} kg")
+                    st.caption(f"Derived from Back Squat e1RM {parent_e1rm:.1f} kg using movement={movement_key}.")
+            else:
+                parent_e1rm = _get_parent_e1rm("Deadlift")
+                if parent_e1rm is None:
+                    st.warning("Could not estimate parent lift (Deadlift). Ensure it exists in Exercises.")
+                else:
+                    uni_e1rm_eq = estimate_unilateral_from_bilateral(parent_e1rm, "sl_rdl", presumed_level)
+                    st.metric("Unilateral e1RM-equivalent (per leg)", f"{uni_e1rm_eq:.1f} kg")
+                    st.caption(f"Derived from Deadlift e1RM {parent_e1rm:.1f} kg using movement=sl_rdl.")
+
+    st.divider()
+
+    # -----------------------------
+    # Prescription builder from rep schemes (uses auto e1RM)
+    # -----------------------------
+    st.subheader("Prescription builder (from rep schemes)")
+
+    goal = st.selectbox("Adaptation goal", options=["endurance", "hypertrophy", "strength", "power"], index=0, key="sc_goal")
     schemes = list_rep_schemes(goal)
 
     if not schemes:
-        st.warning("No rep schemes found for this goal. Seed the DB first.")
+        st.warning("No rep schemes found for this goal. Seed rep schemes first.")
+        st.stop()
+
+    # pick first scheme (MVP); later you can add scheme selector
+    s = schemes[0]
+    _, s_goal, s_phase, reps_min, reps_max, sets_min, sets_max, pct_min, pct_max, rpe_min, rpe_max, rest_min, rest_max, intent = s
+
+    st.markdown(f"**Scheme:** {s_goal} ({s_phase if s_phase else 'default'})")
+    st.write(f"- Sets: **{sets_min}–{sets_max}**")
+    st.write(f"- Reps: **{reps_min}–{reps_max}**")
+    if pct_min is not None and pct_max is not None:
+        st.write(f"- %1RM: **{int(pct_min*100)}–{int(pct_max*100)}%**")
     else:
-        # pick first scheme for MVP; later you can let user choose among multiple phases
-        s = schemes[0]
-        _, s_goal, s_phase, reps_min, reps_max, sets_min, sets_max, pct_min, pct_max, rpe_min, rpe_max, rest_min, rest_max, intent = s
+        st.write("- %1RM: **n/a**")
+    if rest_min and rest_max:
+        st.write(f"- Rest: **{rest_min}–{rest_max} sec**")
+    if intent:
+        st.write(f"- Intent: **{intent}**")
+    if rpe_min and rpe_max:
+        st.write(f"- RPE target: **{rpe_min}–{rpe_max}**")
 
-        st.markdown(f"**Scheme:** {s_goal} ({s_phase if s_phase else 'default'})")
-        st.write(
-            f"- Sets: **{sets_min}–{sets_max}**\n"
-            f"- Reps: **{reps_min}–{reps_max}**\n"
-            f"- %1RM: **{int(pct_min*100)}–{int(pct_max*100)}%**" if pct_min is not None and pct_max is not None else
-            f"- %1RM: **n/a**"
-        )
-        if rest_min and rest_max:
-            st.write(f"- Rest: **{rest_min}–{rest_max} sec**")
-        if intent:
-            st.write(f"- Intent: **{intent}**")
-        if rpe_min and rpe_max:
-            st.write(f"- RPE target: **{rpe_min}–{rpe_max}**")
-
-        if metric == "rel_1rm_bw":
-            if test_value and test_value > 0 and pct_min is not None and pct_max is not None:
-                w_min = float(test_value) * float(pct_min)
-                w_max = float(test_value) * float(pct_max)
-                st.info(f"Suggested working range: **{w_min:.1f}–{w_max:.1f} kg**")
-            else:
-                st.info("Enter an estimated 1RM to generate working loads.")
+    if metric == "pullup_reps":
+        st.info("Pull-ups: prescribe reps/sets + intent. (No %1RM load range).")
+    else:
+        if est["estimated_1rm_kg"] is None or pct_min is None or pct_max is None:
+            st.info("Missing e1RM estimate or %1RM range. Ensure BW is set and norms exist.")
         else:
-            st.info("Pull-ups are prescribed using reps/sets and intent rather than %1RM.")
+            # Safety cap for week-1 style suggestions (conservative default)
+            cap_max = 0.70 if goal in ["strength"] else 0.75
+            pct_min_safe = float(pct_min)
+            pct_max_safe = min(float(pct_max), cap_max)
+
+            w_min = float(est["estimated_1rm_kg"]) * pct_min_safe
+            w_max = float(est["estimated_1rm_kg"]) * pct_max_safe
+            st.info(f"Suggested working load range (capped): **{w_min:.1f}–{w_max:.1f} kg**")
+            st.caption("Cap applied to keep early prescribing conservative; the 6-week block will progress loads week-to-week.")
 
     st.divider()
 
-    # --- Save test result (optional) ---
-    st.subheader("Save this test result to the patient record")
-
-    if st.button("Save test"):
-        if metric == "pullup_reps":
-            # store reps as note; estimated_1rm_kg remains null
-            insert_strength_test(
-                pid, ex_id, date.today().isoformat(),
-                None, int(test_value), None,
-                "bilateral", f"Pull-up reps saved: {int(test_value)}"
-            )
+    # -----------------------------
+    # Show saved estimate (if exists) for the selected exercise
+    # -----------------------------
+    st.subheader("Saved estimate (if previously stored)")
+    saved = get_strength_estimate(pid, ex_id)
+    if saved is None:
+        st.caption("No saved estimate for this exercise yet.")
+    else:
+        as_of_date, e1rm_kg, rel_bw, lvl_used, sex_used, age_used, bw_used, method, notes = saved
+        if e1rm_kg is not None:
+            st.write(f"- As of: **{as_of_date}**")
+            st.write(f"- e1RM: **{float(e1rm_kg):.1f} kg** (rel: {float(rel_bw):.2f}×BW)")
+            st.write(f"- Inputs: sex={sex_used}, age={age_used}, bw={bw_used}, level={lvl_used}")
+            st.caption(f"Method: {method} | Notes: {notes}")
         else:
-            insert_strength_test(
-                pid, ex_id, date.today().isoformat(),
-                float(test_value) if test_value and test_value > 0 else None,
-                None, None,
-                "bilateral",
-                "Estimated 1RM entry"
-            )
-        st.success("Test saved.")
-        st.rerun()
+            st.write(f"- As of: **{as_of_date}**")
+            st.write("- e1RM: **n/a** (exercise uses reps/sets rather than 1RM)")
+            st.write(f"- Inputs: sex={sex_used}, age={age_used}, bw={bw_used}, level={lvl_used}")
+            st.caption(f"Method: {method} | Notes: {notes}")
