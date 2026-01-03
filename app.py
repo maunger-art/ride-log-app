@@ -6,41 +6,16 @@ from typing import Optional
 
 from db_store import (
     init_db,
+    upsert_patient, list_patients,
+    add_ride, fetch_rides,
+    upsert_week_plan, fetch_week_plans,
+    save_strava_tokens, get_strava_tokens, is_activity_synced, mark_activity_synced,
+    upsert_patient_profile, get_patient_profile,
+    list_exercises, list_rep_schemes, count_norm_rows,
+    estimate_e1rm_kg_for_exercise, estimate_unilateral_from_bilateral,
+    upsert_strength_estimate, get_strength_estimate,
 
-    # patients
-    upsert_patient,
-    list_patients,
-
-    # rides
-    add_ride,
-    fetch_rides,
-
-    # weekly plan
-    upsert_week_plan,
-    fetch_week_plans,
-
-    # strava
-    save_strava_tokens,
-    get_strava_tokens,
-    is_activity_synced,
-    mark_activity_synced,
-
-    # profile
-    upsert_patient_profile,
-    get_patient_profile,
-
-    # S&C library
-    list_exercises,
-    list_rep_schemes,
-    count_norm_rows,
-
-    # strength estimation
-    estimate_e1rm_kg_for_exercise,
-    estimate_unilateral_from_bilateral,
-    upsert_strength_estimate,
-    get_strength_estimate,
-
-    # S&C programming
+    # S&C programming (current architecture)
     create_sc_block,
     upsert_sc_week,
     upsert_sc_session,
