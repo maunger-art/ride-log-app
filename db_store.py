@@ -63,7 +63,28 @@ def init_db() -> None:
     CREATE TABLE IF NOT EXISTS patients (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
+        owner_user_id TEXT,
         created_at TEXT DEFAULT (datetime('now'))
+    )
+    """)
+
+    _ensure_column(cur, "patients", "owner_user_id", "owner_user_id TEXT")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_roles (
+        user_id TEXT PRIMARY KEY,
+        role TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS coach_patient_access (
+        coach_user_id TEXT NOT NULL,
+        patient_id INTEGER NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (coach_user_id, patient_id),
+        FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
     )
     """)
 
@@ -333,13 +354,15 @@ def init_db() -> None:
 # -----------------------------
 # Patients
 # -----------------------------
-def upsert_patient(name: str) -> int:
+def upsert_patient(name: str, owner_user_id: Optional[str] = None) -> int:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO patients(name) VALUES (?)
-        ON CONFLICT(name) DO UPDATE SET name=excluded.name
-    """, (name,))
+        INSERT INTO patients(name, owner_user_id) VALUES (?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            name=excluded.name,
+            owner_user_id=COALESCE(excluded.owner_user_id, patients.owner_user_id)
+    """, (name, owner_user_id))
     conn.commit()
     cur.execute("SELECT id FROM patients WHERE name = ?", (name,))
     pid = int(cur.fetchone()[0])
@@ -354,6 +377,378 @@ def list_patients() -> List[Tuple[int, str]]:
     rows = cur.fetchall()
     conn.close()
     return [(int(r[0]), str(r[1])) for r in rows]
+
+
+def get_user_role(user_id: str) -> Optional[str]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT role FROM user_roles WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return None if row is None else str(row[0])
+
+
+def upsert_user_role(user_id: str, role: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO user_roles(user_id, role)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            role=excluded.role
+    """, (user_id, role))
+    conn.commit()
+    conn.close()
+
+
+def assign_patient_to_coach(coach_user_id: str, patient_id: int) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO coach_patient_access(coach_user_id, patient_id)
+        VALUES (?, ?)
+    """, (coach_user_id, int(patient_id)))
+    conn.commit()
+    conn.close()
+
+
+def list_patients_for_user(user_id: str, role: str) -> List[Tuple[int, str]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    if role == "coach":
+        cur.execute("""
+            SELECT p.id, p.name
+            FROM patients p
+            JOIN coach_patient_access cpa ON cpa.patient_id = p.id
+            WHERE cpa.coach_user_id = ?
+            ORDER BY p.name ASC
+        """, (user_id,))
+    elif role == "client":
+        cur.execute("""
+            SELECT id, name
+            FROM patients
+            WHERE owner_user_id = ?
+            ORDER BY name ASC
+        """, (user_id,))
+    else:
+        conn.close()
+        return []
+    rows = cur.fetchall()
+    conn.close()
+    return [(int(r[0]), str(r[1])) for r in rows]
+
+
+def _user_can_access_patient(cur: sqlite3.Cursor, user_id: str, role: str, patient_id: int) -> bool:
+    if role == "coach":
+        cur.execute("""
+            SELECT 1
+            FROM coach_patient_access
+            WHERE coach_user_id = ? AND patient_id = ?
+            LIMIT 1
+        """, (user_id, int(patient_id)))
+        return cur.fetchone() is not None
+    if role == "client":
+        cur.execute("""
+            SELECT 1
+            FROM patients
+            WHERE id = ? AND owner_user_id = ?
+            LIMIT 1
+        """, (int(patient_id), user_id))
+        return cur.fetchone() is not None
+    return False
+
+
+def _assert_patient_access(user_id: str, role: str, patient_id: int) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    ok = _user_can_access_patient(cur, user_id, role, patient_id)
+    conn.close()
+    if not ok:
+        raise PermissionError("User is not permitted to access this patient.")
+
+
+def _assert_coach(role: str) -> None:
+    if role != "coach":
+        raise PermissionError("User does not have coach permissions.")
+
+
+def _get_block_patient_id(cur: sqlite3.Cursor, block_id: int) -> Optional[int]:
+    cur.execute("SELECT patient_id FROM sc_blocks WHERE id = ?", (int(block_id),))
+    row = cur.fetchone()
+    return None if row is None else int(row[0])
+
+
+def _get_session_exercise_patient_id(cur: sqlite3.Cursor, row_id: int) -> Optional[int]:
+    cur.execute("""
+        SELECT b.patient_id
+        FROM sc_session_exercises x
+        JOIN sc_sessions s ON s.id = x.session_id
+        JOIN sc_weeks w ON w.id = s.week_id
+        JOIN sc_blocks b ON b.id = w.block_id
+        WHERE x.id = ?
+    """, (int(row_id),))
+    row = cur.fetchone()
+    return None if row is None else int(row[0])
+
+
+def _assert_block_access(user_id: str, role: str, block_id: int) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    patient_id = _get_block_patient_id(cur, block_id)
+    if patient_id is None:
+        conn.close()
+        raise ValueError("Block not found.")
+    ok = _user_can_access_patient(cur, user_id, role, patient_id)
+    conn.close()
+    if not ok:
+        raise PermissionError("User is not permitted to access this block.")
+
+
+def add_ride_for_user(
+    user_id: str,
+    role: str,
+    patient_id: int,
+    ride_date: str,
+    distance_km: float,
+    duration_min: int,
+    rpe: Optional[int],
+    notes: Optional[str],
+) -> None:
+    _assert_patient_access(user_id, role, patient_id)
+    add_ride(patient_id, ride_date, distance_km, duration_min, rpe, notes)
+
+
+def fetch_rides_for_user(
+    user_id: str,
+    role: str,
+    patient_id: int,
+) -> List[Tuple[str, float, int, Optional[int], Optional[str]]]:
+    _assert_patient_access(user_id, role, patient_id)
+    return fetch_rides(patient_id)
+
+
+def upsert_week_plan_for_user(
+    user_id: str,
+    role: str,
+    patient_id: int,
+    week_start: str,
+    planned_km: Optional[float],
+    planned_hours: Optional[float],
+    phase: Optional[str],
+    notes: Optional[str],
+) -> None:
+    _assert_coach(role)
+    _assert_patient_access(user_id, role, patient_id)
+    upsert_week_plan(patient_id, week_start, planned_km, planned_hours, phase, notes)
+
+
+def fetch_week_plans_for_user(
+    user_id: str,
+    role: str,
+    patient_id: int,
+) -> List[Tuple[str, Optional[float], Optional[float], Optional[str], Optional[str]]]:
+    _assert_patient_access(user_id, role, patient_id)
+    return fetch_week_plans(patient_id)
+
+
+def save_strava_tokens_for_user(
+    user_id: str,
+    role: str,
+    patient_id: int,
+    access_token: str,
+    refresh_token: str,
+    expires_at: int,
+    athlete_id: Optional[int],
+    scope: Optional[str],
+) -> None:
+    _assert_patient_access(user_id, role, patient_id)
+    save_strava_tokens(patient_id, access_token, refresh_token, expires_at, athlete_id, scope)
+
+
+def get_strava_tokens_for_user(user_id: str, role: str, patient_id: int):
+    _assert_patient_access(user_id, role, patient_id)
+    return get_strava_tokens(patient_id)
+
+
+def mark_activity_synced_for_user(user_id: str, role: str, patient_id: int, activity_id: int) -> None:
+    _assert_patient_access(user_id, role, patient_id)
+    mark_activity_synced(patient_id, activity_id)
+
+
+def is_activity_synced_for_user(user_id: str, role: str, patient_id: int, activity_id: int) -> bool:
+    _assert_patient_access(user_id, role, patient_id)
+    return is_activity_synced(patient_id, activity_id)
+
+
+def upsert_patient_profile_for_user(
+    user_id: str,
+    role: str,
+    patient_id: int,
+    sex: Optional[str],
+    dob: Optional[str],
+    bodyweight_kg: Optional[float],
+    presumed_level: Optional[str],
+) -> None:
+    _assert_patient_access(user_id, role, patient_id)
+    upsert_patient_profile(patient_id, sex, dob, bodyweight_kg, presumed_level)
+
+
+def get_patient_profile_for_user(user_id: str, role: str, patient_id: int):
+    _assert_patient_access(user_id, role, patient_id)
+    return get_patient_profile(patient_id)
+
+
+def upsert_strength_estimate_for_user(
+    user_id: str,
+    role: str,
+    patient_id: int,
+    exercise_id: int,
+    as_of_date: str,
+    estimated_1rm_kg: Optional[float],
+    estimated_rel_1rm_bw: Optional[float],
+    level_used: str,
+    sex_used: str,
+    age_used: int,
+    bw_used: Optional[float],
+    method: str,
+    notes: Optional[str] = None,
+) -> None:
+    _assert_patient_access(user_id, role, patient_id)
+    upsert_strength_estimate(
+        patient_id,
+        exercise_id,
+        as_of_date,
+        estimated_1rm_kg,
+        estimated_rel_1rm_bw,
+        level_used,
+        sex_used,
+        age_used,
+        bw_used,
+        method,
+        notes,
+    )
+
+
+def get_strength_estimate_for_user(user_id: str, role: str, patient_id: int, exercise_id: int):
+    _assert_patient_access(user_id, role, patient_id)
+    return get_strength_estimate(patient_id, exercise_id)
+
+
+def create_sc_block_for_user(
+    user_id: str,
+    role: str,
+    patient_id: int,
+    start_date: str,
+    goal: str,
+    notes: Optional[str] = None,
+    weeks: int = 6,
+    model: str = "hybrid_v1",
+    deload_week: int = 4,
+    sessions_per_week: int = 2,
+) -> int:
+    _assert_coach(role)
+    _assert_patient_access(user_id, role, patient_id)
+    return create_sc_block(
+        patient_id=patient_id,
+        start_date=start_date,
+        goal=goal,
+        notes=notes,
+        weeks=weeks,
+        model=model,
+        deload_week=deload_week,
+        sessions_per_week=sessions_per_week,
+    )
+
+
+def upsert_sc_week_for_user(
+    user_id: str,
+    role: str,
+    block_id: int,
+    week_no: int,
+    week_start: str,
+    focus: Optional[str],
+    deload_flag: bool,
+    notes: Optional[str] = None,
+) -> int:
+    _assert_coach(role)
+    _assert_block_access(user_id, role, block_id)
+    return upsert_sc_week(block_id, week_no, week_start, focus, deload_flag, notes)
+
+
+def upsert_sc_session_for_user(
+    user_id: str,
+    role: str,
+    week_id: int,
+    session_label: str,
+    day_hint: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> int:
+    _assert_coach(role)
+    return upsert_sc_session(week_id, session_label, day_hint, notes)
+
+
+def clear_sc_session_exercises_for_user(user_id: str, role: str, session_id: int) -> None:
+    _assert_coach(role)
+    clear_sc_session_exercises(session_id)
+
+
+def add_sc_session_exercise_for_user(
+    user_id: str,
+    role: str,
+    session_id: int,
+    exercise_id: int,
+    sets_target: int,
+    reps_target: int,
+    pct_1rm_target: Optional[float],
+    load_kg_target: Optional[float],
+    rpe_target: Optional[int],
+    rest_sec_target: Optional[int],
+    intent: Optional[str],
+    notes: Optional[str],
+) -> int:
+    _assert_coach(role)
+    return add_sc_session_exercise(
+        session_id,
+        exercise_id,
+        sets_target,
+        reps_target,
+        pct_1rm_target,
+        load_kg_target,
+        rpe_target,
+        rest_sec_target,
+        intent,
+        notes,
+    )
+
+
+def update_sc_session_exercise_actual_for_user(
+    user_id: str,
+    role: str,
+    row_id: int,
+    sets_actual: Optional[int],
+    reps_actual: Optional[int],
+    load_kg_actual: Optional[float],
+    completed_flag: bool,
+    actual_notes: Optional[str],
+) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    patient_id = _get_session_exercise_patient_id(cur, row_id)
+    conn.close()
+    if patient_id is None:
+        raise ValueError("Session exercise not found.")
+    _assert_patient_access(user_id, role, patient_id)
+    update_sc_session_exercise_actual(row_id, sets_actual, reps_actual, load_kg_actual, completed_flag, actual_notes)
+
+
+def fetch_latest_sc_block_for_user(user_id: str, role: str, patient_id: int):
+    _assert_patient_access(user_id, role, patient_id)
+    return fetch_latest_sc_block(patient_id)
+
+
+def fetch_sc_block_detail_for_user(user_id: str, role: str, block_id: int):
+    _assert_block_access(user_id, role, block_id)
+    return fetch_sc_block_detail(block_id)
 
 
 # -----------------------------
