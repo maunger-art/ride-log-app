@@ -5,30 +5,35 @@ from datetime import date, datetime
 
 from db_store import (
     init_db,
+
+    # patients
     upsert_patient,
     list_patients,
+
+    # rides
     add_ride,
     fetch_rides,
+
+    # weekly plan
     upsert_week_plan,
     fetch_week_plans,
-    # Strava
+
+    # strava
     save_strava_tokens,
     get_strava_tokens,
     is_activity_synced,
     mark_activity_synced,
-    # Strength DB status (optional/admin)
-    count_norm_rows,
-    list_exercises,
-    list_rep_schemes,
-    get_norm_standard,
+
+    # profile
     upsert_patient_profile,
     get_patient_profile,
-    insert_strength_test,
-    upsert_patient_profile,
-    get_patient_profile,
+
+    # S&C library
     list_exercises,
     list_rep_schemes,
     count_norm_rows,
+
+    # strength estimation
     estimate_e1rm_kg_for_exercise,
     estimate_unilateral_from_bilateral,
     upsert_strength_estimate,
