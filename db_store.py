@@ -9,6 +9,7 @@ SQLite persistence layer for Ride Log app:
 - S&C library: exercises, rep schemes, normative strength standards
 - Patient profile (sex, dob, bodyweight, presumed_level)
 - Strength estimates (auto-estimated e1RM audit trail)
+- S&C programming: 6-week blocks (blocks/weeks/sessions/session_exercises)
 
 Designed to be safe on Streamlit Cloud:
 - Creates ./data directory
@@ -184,10 +185,9 @@ def init_db() -> None:
     ON norm_strength_standards(exercise_id, sex, metric, age_min, age_max)
     """)
 
-    # =========================================================
-    # MIGRATIONS: Patient profile (presumed_level) + strength estimates
-    # =========================================================
-    # Patient profile table (create if missing)
+    # -----------------------------
+    # Patient profile (sex/dob/BW/level)
+    # -----------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS patient_profile (
         patient_id INTEGER PRIMARY KEY,
@@ -205,7 +205,9 @@ def init_db() -> None:
     if "presumed_level" not in cols:
         cur.execute("ALTER TABLE patient_profile ADD COLUMN presumed_level TEXT")
 
-    # Strength estimates table (create if missing)
+    # -----------------------------
+    # Strength estimates (auto-estimated e1RM audit trail)
+    # -----------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS strength_estimates (
         patient_id INTEGER NOT NULL,
@@ -226,6 +228,73 @@ def init_db() -> None:
     )
     """)
 
+    # =========================================================
+    # S&C Programming: 6-week blocks (meso) + sessions + exercises
+    # =========================================================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sc_blocks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        patient_id INTEGER NOT NULL,
+        start_date TEXT NOT NULL,            -- YYYY-MM-DD (Mon recommended)
+        weeks INTEGER NOT NULL DEFAULT 6,
+        model TEXT NOT NULL,                 -- 'hybrid_v1'
+        deload_week INTEGER NOT NULL DEFAULT 4,
+        sessions_per_week INTEGER NOT NULL DEFAULT 2,
+        goal TEXT,                           -- endurance/hypertrophy/strength/power/hybrid
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sc_weeks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        block_id INTEGER NOT NULL,
+        week_no INTEGER NOT NULL,            -- 1..6
+        week_start TEXT NOT NULL,            -- YYYY-MM-DD
+        focus TEXT,                          -- capacity/hypertrophy/strength/power/deload
+        deload_flag INTEGER NOT NULL DEFAULT 0,
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (block_id) REFERENCES sc_blocks(id) ON DELETE CASCADE,
+        UNIQUE(block_id, week_no)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sc_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        week_id INTEGER NOT NULL,
+        session_label TEXT NOT NULL,         -- 'A' | 'B'
+        day_hint TEXT,                       -- 'Tue'/'Thu' etc (optional)
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (week_id) REFERENCES sc_weeks(id) ON DELETE CASCADE,
+        UNIQUE(week_id, session_label)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sc_session_exercises (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        exercise_id INTEGER NOT NULL,
+        sets INTEGER NOT NULL,
+        reps INTEGER NOT NULL,
+        pct_1rm REAL,                        -- 0..1 (nullable for pull-ups)
+        load_kg REAL,                        -- nullable for pull-ups
+        rpe_target INTEGER,                  -- nullable
+        rest_sec INTEGER,                    -- nullable
+        intent TEXT,
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (session_id) REFERENCES sc_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
+    )
+    """)
+
+    # One commit at end (atomic schema creation)
     conn.commit()
     conn.close()
 
@@ -241,7 +310,6 @@ def upsert_patient(name: str) -> int:
         ON CONFLICT(name) DO UPDATE SET name=excluded.name
     """, (name,))
     conn.commit()
-    # fetch id
     cur.execute("SELECT id FROM patients WHERE name = ?", (name,))
     pid = int(cur.fetchone()[0])
     conn.close()
@@ -330,7 +398,7 @@ def fetch_week_plans(patient_id: int) -> List[Tuple[str, Optional[float], Option
     """, (patient_id,))
     rows = cur.fetchall()
     conn.close()
-    out = []
+    out: List[Tuple[str, Optional[float], Optional[float], Optional[str], Optional[str]]] = []
     for r in rows:
         out.append((str(r[0]),
                     None if r[1] is None else float(r[1]),
@@ -672,7 +740,6 @@ def get_strength_estimate(patient_id: int, exercise_id: int):
 
 # -----------------------------
 # Estimation engine helpers (Option A anchor scaling)
-# These are pure helpers you can call from app.py
 # -----------------------------
 def _level_to_target_ratio(poor: float, fair: float, good: float, excellent: float, level: str) -> float:
     level = (level or "intermediate").lower()
@@ -777,3 +844,164 @@ def estimate_unilateral_from_bilateral(
         base = 0.35
 
     return float(bilateral_e1rm_kg) * float(base)
+
+
+# =========================================================
+# S&C Programming helpers (blocks/weeks/sessions)
+# =========================================================
+def create_sc_block(
+    patient_id: int,
+    start_date: str,
+    goal: str,
+    notes: Optional[str] = None,
+    weeks: int = 6,
+    model: str = "hybrid_v1",
+    deload_week: int = 4,
+    sessions_per_week: int = 2,
+) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sc_blocks(patient_id, start_date, weeks, model, deload_week, sessions_per_week, goal, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (int(patient_id), start_date, int(weeks), model, int(deload_week), int(sessions_per_week), goal, notes))
+    conn.commit()
+    block_id = int(cur.lastrowid)
+    conn.close()
+    return block_id
+
+
+def upsert_sc_week(
+    block_id: int,
+    week_no: int,
+    week_start: str,
+    focus: Optional[str],
+    deload_flag: bool,
+    notes: Optional[str] = None,
+) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sc_weeks(block_id, week_no, week_start, focus, deload_flag, notes)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(block_id, week_no) DO UPDATE SET
+            week_start=excluded.week_start,
+            focus=excluded.focus,
+            deload_flag=excluded.deload_flag,
+            notes=excluded.notes
+    """, (int(block_id), int(week_no), week_start, focus, 1 if deload_flag else 0, notes))
+    conn.commit()
+    cur.execute("SELECT id FROM sc_weeks WHERE block_id=? AND week_no=?", (int(block_id), int(week_no)))
+    week_id = int(cur.fetchone()[0])
+    conn.close()
+    return week_id
+
+
+def upsert_sc_session(
+    week_id: int,
+    session_label: str,
+    day_hint: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sc_sessions(week_id, session_label, day_hint, notes)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(week_id, session_label) DO UPDATE SET
+            day_hint=excluded.day_hint,
+            notes=excluded.notes
+    """, (int(week_id), session_label, day_hint, notes))
+    conn.commit()
+    cur.execute("SELECT id FROM sc_sessions WHERE week_id=? AND session_label=?", (int(week_id), session_label))
+    sid = int(cur.fetchone()[0])
+    conn.close()
+    return sid
+
+
+def clear_sc_session_exercises(session_id: int) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM sc_session_exercises WHERE session_id = ?", (int(session_id),))
+    conn.commit()
+    conn.close()
+
+
+def add_sc_session_exercise(
+    session_id: int,
+    exercise_id: int,
+    sets: int,
+    reps: int,
+    pct_1rm: Optional[float],
+    load_kg: Optional[float],
+    rpe_target: Optional[int],
+    rest_sec: Optional[int],
+    intent: Optional[str],
+    notes: Optional[str],
+) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sc_session_exercises(
+            session_id, exercise_id, sets, reps, pct_1rm, load_kg, rpe_target, rest_sec, intent, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        int(session_id), int(exercise_id), int(sets), int(reps),
+        pct_1rm, load_kg, rpe_target, rest_sec, intent, notes
+    ))
+    conn.commit()
+    conn.close()
+
+
+def fetch_latest_sc_block(patient_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, start_date, weeks, model, deload_week, sessions_per_week, goal, notes, created_at
+        FROM sc_blocks
+        WHERE patient_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (int(patient_id),))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def fetch_sc_block_detail(block_id: int):
+    """
+    Returns list of tuples:
+      (week_no, week_start, focus, deload_flag, session_label, day_hint, exercises_list)
+
+    exercises_list rows:
+      (exercise_name, sets, reps, pct_1rm, load_kg, rpe_target, rest_sec, intent, notes)
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT w.id, w.week_no, w.week_start, w.focus, w.deload_flag,
+               s.id, s.session_label, s.day_hint
+        FROM sc_weeks w
+        JOIN sc_sessions s ON s.week_id = w.id
+        WHERE w.block_id = ?
+        ORDER BY w.week_no ASC, s.session_label ASC
+    """, (int(block_id),))
+    rows = cur.fetchall()
+
+    out = []
+    for r in rows:
+        week_id, week_no, week_start, focus, deload_flag, session_id, label, day_hint = r
+        cur.execute("""
+            SELECT e.name, x.sets, x.reps, x.pct_1rm, x.load_kg, x.rpe_target, x.rest_sec, x.intent, x.notes
+            FROM sc_session_exercises x
+            JOIN exercises e ON e.id = x.exercise_id
+            WHERE x.session_id = ?
+            ORDER BY x.id ASC
+        """, (int(session_id),))
+        exs = cur.fetchall()
+        out.append((int(week_no), str(week_start), focus, bool(deload_flag), str(label), day_hint, exs))
+
+    conn.close()
+    return out
