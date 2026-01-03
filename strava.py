@@ -1,17 +1,9 @@
-import os
 import time
-import requests
 from urllib.parse import urlencode
 
-try:
-    import streamlit as st
-    STRAVA_CLIENT_ID = st.secrets.get("STRAVA_CLIENT_ID", os.getenv("STRAVA_CLIENT_ID"))
-    STRAVA_CLIENT_SECRET = st.secrets.get("STRAVA_CLIENT_SECRET", os.getenv("STRAVA_CLIENT_SECRET"))
-    STRAVA_REDIRECT_URI = st.secrets.get("STRAVA_REDIRECT_URI", os.getenv("STRAVA_REDIRECT_URI"))
-except Exception:
-    STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID")
-    STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
-    STRAVA_REDIRECT_URI = os.getenv("STRAVA_REDIRECT_URI")
+import requests
+
+from config import STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, STRAVA_REDIRECT_URI
 
 AUTH_URL = "https://www.strava.com/oauth/authorize"
 TOKEN_URL = "https://www.strava.com/api/v3/oauth/token"
