@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import Optional, Any, List, Tuple
+from typing import Optional, List, Tuple
 
 
 # -----------------------------
@@ -282,8 +282,8 @@ def init_db() -> None:
         exercise_id INTEGER NOT NULL,
         sets INTEGER NOT NULL,
         reps INTEGER NOT NULL,
-        pct_1rm REAL,                        -- 0..1 (nullable for pull-ups)
-        load_kg REAL,                        -- nullable for pull-ups
+        pct_1rm REAL,                        -- 0..1 (nullable for pull-ups / isometrics)
+        load_kg REAL,                        -- nullable
         rpe_target INTEGER,                  -- nullable
         rest_sec INTEGER,                    -- nullable
         intent TEXT,
