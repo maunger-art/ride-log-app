@@ -23,7 +23,7 @@ from db_store import (
     add_sc_session_exercise,
     fetch_latest_sc_block,
     fetch_sc_block_detail,
-    update_sc_session_exercise_actual,
+    update_sc_session_exercise_actual,  # not implemented yet
 )
 
 from plan import parse_plan_csv, rides_to_weekly_summary, to_monday
