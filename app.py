@@ -1,6 +1,6 @@
 import streamlit as st
 import os
-from supabase import create_client
+from supabase import Client, create_client
 
 # -------------------------------------------------
 # Streamlit app config (MUST be first Streamlit call)
@@ -15,20 +15,11 @@ st.set_page_config(
 # Supabase configuration (ENV)
 # -------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("Supabase environment variables are not set.")
     st.stop()
-
-# -------------------------------------------------
-# Supabase client (cached – ONE per session)
-# -------------------------------------------------
-@st.cache_resource
-def get_supabase():
-    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-
-supabase = get_supabase()
 
 # -------------------------------------------------
 # OPTIONAL sanity check during setup
