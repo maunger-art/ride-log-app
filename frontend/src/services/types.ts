@@ -67,3 +67,11 @@ export type ScSession = {
   day_hint?: string | null;
   exercises: ScSessionExercise[];
 };
+
+export type StravaStatus = {
+  connected: boolean;
+  auth_url?: string | null;
+  athlete_id?: number | null;
+  scope?: string | null;
+  expires_at?: number | null;
+};
