@@ -19,11 +19,12 @@ Set these environment variables in the platform dashboard:
 
 - `SUPABASE_URL` (use the exact project URL, formatted like `https://<project-ref>.supabase.co`)
 - `SUPABASE_KEY` (use the anon/public key)
+- `SUPABASE_EMAIL_REDIRECT` (optional, where magic-link emails should return users; e.g. `https://your-app.streamlit.app`)
 - (Optional) Strava variables if you use that feature.
 
 ## Verify Supabase auth settings
 
-1. In Supabase, ensure **email/password auth** is enabled for the project.
+1. In Supabase, ensure **email/password auth** and **email OTP/magic links** are enabled for the project.
 2. Add the env variables above to your hosting provider’s settings.
 3. Restart/redeploy the app so the new configuration is picked up.
 
