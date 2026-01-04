@@ -876,9 +876,122 @@ with tab2:
         st.divider()
         _render_strava_section()
     else:
-        _render_strava_section()
-        st.divider()
-        _render_weekly_section()
+        rides = db.fetch_rides_for_user(user_id, role, pid)
+        rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
+
+        plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
+        plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
+
+        latest_block = db.fetch_latest_sc_block_for_user(user_id, role, pid)
+
+        patient_tab_plan, patient_tab_rides, patient_tab_sc, patient_tab_settings = st.tabs(
+            ["Plan vs Actual", "My Rides", "S&C Plan", "Settings"]
+        )
+
+        with patient_tab_plan:
+            _render_weekly_section_from_frames(rides_df, plan_df)
+
+        with patient_tab_rides:
+            if rides_df.empty:
+                st.info("No rides logged yet.")
+            else:
+                rides_df = rides_df.copy()
+                rides_df["ride_date"] = pd.to_datetime(rides_df["ride_date"], errors="coerce")
+                today = date.today()
+                week_start = to_monday(today)
+                month_start = today.replace(day=1)
+
+                week_rides = rides_df[rides_df["ride_date"] >= pd.Timestamp(week_start)]
+                month_rides = rides_df[rides_df["ride_date"] >= pd.Timestamp(month_start)]
+
+                week_distance = float(week_rides["distance_km"].sum()) if not week_rides.empty else 0.0
+                month_distance = float(month_rides["distance_km"].sum()) if not month_rides.empty else 0.0
+                avg_rpe = (
+                    float(pd.to_numeric(rides_df["rpe"], errors="coerce").mean())
+                    if not rides_df["rpe"].dropna().empty
+                    else 0.0
+                )
+
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("This week (km)", f"{week_distance:.1f}")
+                with m2:
+                    st.metric("This month (km)", f"{month_distance:.1f}")
+                with m3:
+                    st.metric("Avg RPE", f"{avg_rpe:.1f}")
+
+                st.divider()
+                st.subheader("Ride log")
+                st.dataframe(rides_df, use_container_width=True)
+
+        with patient_tab_sc:
+            st.subheader("S&C block overview")
+            if latest_block is None:
+                st.info("No S&C block created yet.")
+            else:
+                block_id, start_date_s, weeks, model, deload_wk, spw, goal_s, notes_s, created_at = latest_block
+                st.caption(
+                    f"Block #{block_id} | Start {start_date_s} | {weeks}w | deload week {deload_wk} | "
+                    f"{spw} sessions/wk | goal={goal_s}"
+                )
+
+                try:
+                    block_start = datetime.strptime(str(start_date_s), "%Y-%m-%d").date()
+                    week_index = max(1, (date.today() - block_start).days // 7 + 1)
+                except Exception:
+                    block_start = None
+                    week_index = 1
+
+                week_index = min(int(weeks), max(1, int(week_index)))
+                progress_ratio = week_index / float(weeks) if weeks else 0
+                st.progress(progress_ratio)
+                st.caption(f"Week {week_index} of {weeks}")
+
+                detail = db.fetch_sc_block_detail_for_user(user_id, role, block_id)
+                current_week_sessions = [row for row in detail if row[0] == week_index]
+                if not current_week_sessions:
+                    st.info("No sessions found for the current week.")
+                else:
+                    st.subheader("Current week sessions")
+                    for (wk_no, wk_start, focus, is_deload, label, day_hint, exs) in current_week_sessions:
+                        exp_label = f"Week {wk_no} ({wk_start}) - Session {label} {'(DELOAD)' if is_deload else ''}"
+                        with st.expander(exp_label, expanded=True):
+                            if not exs:
+                                st.info("No exercises found for this session.")
+                                continue
+
+                            ex_rows = []
+                            for ex in exs:
+                                (
+                                    _row_id,
+                                    ex_name,
+                                    sets_t,
+                                    reps_t,
+                                    pct_t,
+                                    load_t,
+                                    rpe_t,
+                                    rest_t,
+                                    intent,
+                                    n_notes,
+                                    _sets_a,
+                                    _reps_a,
+                                    _load_a,
+                                    _completed,
+                                    _a_notes,
+                                ) = ex
+                                ex_rows.append(
+                                    {
+                                        "Exercise": ex_name,
+                                        "Target": f"{sets_t} x {reps_t}",
+                                        "%1RM": pct_t if pct_t is not None else "n/a",
+                                        "Load (kg)": load_t if load_t is not None else "n/a",
+                                        "Notes": n_notes or "",
+                                    }
+                                )
+                            st.dataframe(pd.DataFrame(ex_rows), use_container_width=True)
+
+        with patient_tab_settings:
+            _render_strava_section()
 
 
 # -------------------------------------------------------------------
