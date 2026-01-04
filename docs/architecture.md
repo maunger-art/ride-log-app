@@ -1,17 +1,15 @@
-# Ride Log App – Architecture Overview
+# Architecture overview
 
-This application supports both coach-facing and client-facing workflows
-for endurance training, performance monitoring, and strength & conditioning.
+## Key components
 
-## Core Principles
-- Client-facing first (patients can log rides and S&C actuals)
-- Coach oversight with editable plans
-- Neutral training templates with linear progression
-- Safe, auditable strength estimation (no direct 1RM input)
-
-## Tech Stack
-- Streamlit (UI)
-- SQLite (local persistence)
+- React + Vite front-end (`frontend/`)
+- FastAPI service for the API layer (`api.py`, mounted in `main.py`)
 - Supabase Auth (authentication)
-- Strava API (client-owned connections)
+- PostgreSQL (ride log + training data)
+- Strava API (optional, training data import)
 
+## Data flow
+
+1. React app calls FastAPI endpoints under `/api`.
+2. FastAPI reads/writes ride/plan data via `services.py` and `db_store.py`.
+3. Strava sync and strength standards are optional modules that enrich the data layer.
