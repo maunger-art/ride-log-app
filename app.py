@@ -15,7 +15,7 @@ from typing import Optional
 
 from supabase import Client, create_client
 
-from config import SUPABASE_URL, SUPABASE_KEY, APP_MODE
+from config import SUPABASE_URL, SUPABASE_KEY
 from plan import parse_plan_csv, rides_to_weekly_summary, to_monday
 from strava import build_auth_url, exchange_code_for_token, ensure_fresh_token, list_activities
 
@@ -151,21 +151,8 @@ def get_supabase_client() -> Client:
 
 def require_authenticated_user() -> dict:
     if not SUPABASE_URL or not SUPABASE_KEY:
-        if APP_MODE == "production":
-            st.error("Supabase configuration missing. Set SUPABASE_URL and SUPABASE_KEY.")
-            st.stop()
-        st.warning("Supabase configuration missing. Running in local auth mode.")
-        if "auth_user" not in st.session_state:
-            st.title("Local sign in")
-            st.caption("Supabase is not configured. Continue with a local session.")
-            with st.form("local_auth_form", clear_on_submit=False):
-                email = st.text_input("Email (optional)", value="local@example.com")
-                submitted = st.form_submit_button("Continue")
-            if submitted:
-                st.session_state["auth_user"] = {"id": "local-user", "email": email}
-                st.rerun()
-            st.stop()
-        return st.session_state["auth_user"]
+        st.error("Supabase configuration missing. Set SUPABASE_URL and SUPABASE_KEY.")
+        st.stop()
 
     if "auth_user" in st.session_state:
         return st.session_state["auth_user"]
