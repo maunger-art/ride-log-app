@@ -2,16 +2,33 @@
 
 ## Choose a provider
 
-Pick the hosting provider that fits your needs:
+Pick a provider that can host a FastAPI service and serve a static React build. Examples include:
 
-- **Streamlit Community Cloud** (fastest, simplest)
-- **Render** (more control, paid tiers available)
-- **Railway** / **Fly.io** (advanced options)
+- **Render** (simple web service + static build)
+- **Railway** / **Fly.io** (more control)
+- **Vercel + separate API host** (split hosting)
 
-## Deploy from GitHub
+## Build the React app
 
-1. Connect your GitHub account to the provider.
-2. Deploy the repository from the `main` branch.
+From the repo root:
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+This produces `frontend/dist`, which is served at `/` by the FastAPI app.
+
+## Run the FastAPI app
+
+Use the combined app entrypoint:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+The API is available under `/api` and the React app is served from `/`.
 
 ## Configure environment variables
 
@@ -19,7 +36,7 @@ Set these environment variables in the platform dashboard:
 
 - `SUPABASE_URL` (use the exact project URL, formatted like `https://<project-ref>.supabase.co`)
 - `SUPABASE_KEY` (use the anon/public key)
-- `SUPABASE_EMAIL_REDIRECT` (optional, where magic-link emails should return users; e.g. `https://your-app.streamlit.app`)
+- `SUPABASE_EMAIL_REDIRECT` (optional, where magic-link emails should return users; e.g. `https://your-app.example.com`)
 - (Optional) Strava variables if you use that feature.
 
 ## Verify Supabase auth settings
@@ -30,6 +47,6 @@ Set these environment variables in the platform dashboard:
 
 ## Add a custom domain
 
-1. After deployment, copy the provider’s default URL (for example, `your-app.streamlit.app`).
+1. After deployment, copy the provider’s default URL (for example, `your-app.onrender.com`).
 2. In the host’s dashboard, add your custom domain (for example, `app.techniquehealth.org`).
 3. Complete any SSL/TLS validation steps (most platforms auto-issue TLS once DNS is correct).
