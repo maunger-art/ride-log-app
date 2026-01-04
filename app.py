@@ -225,7 +225,6 @@ def require_authenticated_user() -> dict:
 # -----------------------------
 # Streamlit config
 # -----------------------------
-st.set_page_config(page_title="Ride Log – Plan vs Actual", layout="wide")
 
 db.init_db()
 
