@@ -1,15 +1,79 @@
 import streamlit as st
 import os
+from pathlib import Path
 from supabase import Client, create_client
 
 # -------------------------------------------------
 # Streamlit app config (MUST be first Streamlit call)
 # -------------------------------------------------
+ASSET_DIR = Path(__file__).parent / "assets"
+
+
+def _asset_path(filename: str) -> str:
+    return str(ASSET_DIR / filename)
+
+
+TECHNIQUE_FONT_FAMILY = os.environ.get(
+    "TECHNIQUE_FONT_FAMILY",
+    '"acumin-pro", "Acumin Pro", "Helvetica Neue", Arial, sans-serif',
+)
+TECHNIQUE_FONT_URL = os.environ.get(
+    "TECHNIQUE_FONT_URL",
+    "",
+)
+
 st.set_page_config(
     page_title="Technique | Performance & Rehab",
-    page_icon="assets/technique_favicon.png",
+    page_icon=_asset_path("technique_favicon.png"),
     layout="wide",
 )
+
+font_import = f"@import url('{TECHNIQUE_FONT_URL}');" if TECHNIQUE_FONT_URL else ""
+
+st.markdown(
+    f"""
+    <style>
+    {font_import}
+    html, body, [class*="css"] {{
+        font-family: {TECHNIQUE_FONT_FAMILY};
+    }}
+
+    .main .block-container {{
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+        padding-left: 2.5rem;
+        padding-right: 2.5rem;
+    }}
+
+    section[data-testid="stSidebar"] .block-container {{
+        padding-top: 1.5rem;
+    }}
+
+    h1, h2, h3, h4 {{
+        font-weight: 600;
+        letter-spacing: -0.02em;
+    }}
+
+    h1 {{
+        font-size: 2.25rem;
+        margin-bottom: 0.5rem;
+    }}
+
+    h2 {{
+        font-size: 1.6rem;
+        margin-top: 1.75rem;
+    }}
+
+    h3 {{
+        font-size: 1.25rem;
+        margin-top: 1.25rem;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.sidebar.image(_asset_path("technique_logo_full.png"), use_column_width=True)
 
 # -------------------------------------------------
 # Supabase configuration (ENV)
