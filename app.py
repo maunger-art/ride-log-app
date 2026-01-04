@@ -339,15 +339,48 @@ else:
     else:
         pid = [p[0] for p in patients if p[1] == selected][0]
 
-    st.sidebar.caption("Assign existing patient by ID (coach only).")
-    assign_id = st.sidebar.text_input("Patient ID", key="assign_patient_id")
-    if st.sidebar.button("Assign patient"):
-        if assign_id.strip().isdigit():
-            db.assign_patient_to_coach(user_id, int(assign_id))
-            st.sidebar.success("Patient assigned.")
-            st.rerun()
-        else:
-            st.sidebar.error("Enter a numeric patient ID.")
+    if role == "coach":
+        st.sidebar.caption("Assign existing patient by ID (coach only).")
+        assign_id = st.sidebar.text_input("Patient ID", key="assign_patient_id")
+        if st.sidebar.button("Assign patient"):
+            if assign_id.strip().isdigit():
+                db.assign_patient_to_coach(user_id, int(assign_id))
+                st.sidebar.success("Patient assigned.")
+                st.rerun()
+            else:
+                st.sidebar.error("Enter a numeric patient ID.")
+
+if role == "super_admin":
+    st.sidebar.divider()
+    st.sidebar.subheader("Organisation")
+    st.sidebar.caption("Manage coaches in your organisation.")
+    coach_user_id = st.sidebar.text_input("Coach user ID", key="org_coach_user_id")
+    col_add, col_remove = st.sidebar.columns(2)
+    with col_add:
+        if col_add.button("Add coach", key="add_org_coach"):
+            if not coach_user_id.strip():
+                st.sidebar.error("Enter a coach user ID.")
+            elif db.get_user_role(coach_user_id.strip()) != "coach":
+                st.sidebar.error("That user does not have a coach role.")
+            else:
+                db.add_coach_to_org(user_id, coach_user_id.strip())
+                st.sidebar.success("Coach added to organisation.")
+                st.rerun()
+    with col_remove:
+        if col_remove.button("Remove coach", key="remove_org_coach"):
+            if not coach_user_id.strip():
+                st.sidebar.error("Enter a coach user ID.")
+            else:
+                db.remove_coach_from_org(user_id, coach_user_id.strip())
+                st.sidebar.success("Coach removed from organisation.")
+                st.rerun()
+
+    org_coaches = db.list_org_coaches(user_id)
+    if org_coaches:
+        st.sidebar.caption("Current coaches")
+        st.sidebar.code("\n".join(org_coaches))
+    else:
+        st.sidebar.caption("No coaches added yet.")
 
 if pid is None:
     st.warning("Please create or select a patient in the sidebar before using the app.")
@@ -555,7 +588,7 @@ with tab3:
     st.subheader("Plan import (CSV)")
     st.write("Upload a CSV with columns: week_start (Monday, YYYY-MM-DD), planned_km, planned_hours, phase, notes.")
 
-    if role != "coach":
+    if role == "client":
         st.info("Your coach manages the training plan. You can view it below.")
         plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
         plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
@@ -793,7 +826,7 @@ with tab4:
     # -----------------------------
     st.subheader("Create a block (4 / 6 / 8 weeks, hybrid progression, editable)")
 
-    if role != "coach":
+    if role == "client":
         st.info("Your coach manages S&C blocks. You can log actuals below.")
     else:
         colb1, colb2, colb3, colb4 = st.columns(4)
