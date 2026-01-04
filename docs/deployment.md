@@ -17,9 +17,15 @@ Pick the hosting provider that fits your needs:
 
 Set these environment variables in the platform dashboard:
 
-- `SUPABASE_URL`
-- `SUPABASE_KEY`
+- `SUPABASE_URL` (use the exact project URL, formatted like `https://<project-ref>.supabase.co`)
+- `SUPABASE_KEY` (use the anon/public key)
 - (Optional) Strava variables if you use that feature.
+
+## Verify Supabase auth settings
+
+1. In Supabase, ensure **email/password auth** is enabled for the project.
+2. Add the env variables above to your hosting provider’s settings.
+3. Restart/redeploy the app so the new configuration is picked up.
 
 ## Add a custom domain
 
