@@ -43,6 +43,14 @@ def _table_columns(cur: sqlite3.Cursor, table_name: str) -> List[str]:
     return [r[1] for r in cur.fetchall()]
 
 
+def _table_exists(cur: sqlite3.Cursor, table_name: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    )
+    return cur.fetchone() is not None
+
+
 def _ensure_column(cur: sqlite3.Cursor, table: str, col: str, ddl: str) -> None:
     cols = _table_columns(cur, table)
     if col not in cols:
@@ -694,7 +702,9 @@ def list_patients_for_user(user_id: str, role: str) -> List[Tuple[int, str]]:
 
 
 def _user_can_access_patient(cur: sqlite3.Cursor, user_id: str, role: str, patient_id: int) -> bool:
-    if role == "coach":
+    if role not in {"coach", "client"}:
+        return False
+    if _table_exists(cur, "patient_access"):
         cur.execute("""
             SELECT 1
             FROM patients p
@@ -715,15 +725,21 @@ def _user_can_access_patient(cur: sqlite3.Cursor, user_id: str, role: str, patie
             LIMIT 1
         """, (int(patient_id), user_id))
         return cur.fetchone() is not None
-    if role == "client":
+    if role == "coach":
         cur.execute("""
             SELECT 1
-            FROM patients
-            WHERE id = ? AND owner_user_id = ?
+            FROM coach_patient_access
+            WHERE coach_user_id = ? AND patient_id = ?
             LIMIT 1
-        """, (int(patient_id), user_id))
+        """, (user_id, int(patient_id)))
         return cur.fetchone() is not None
-    return False
+    cur.execute("""
+        SELECT 1
+        FROM patients
+        WHERE id = ? AND owner_user_id = ?
+        LIMIT 1
+    """, (int(patient_id), user_id))
+    return cur.fetchone() is not None
 
 
 def _assert_patient_access(user_id: str, role: str, patient_id: int) -> None:
