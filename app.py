@@ -721,6 +721,42 @@ with tab2:
 
             st.dataframe(merged, use_container_width=True)
 
+    def _render_weekly_section_from_frames(rides_df, plan_df):
+        st.subheader("Weekly plan vs actual")
+
+        if not plan_df.empty:
+            plan_df = plan_df.copy()
+            plan_df["week_start"] = pd.to_datetime(plan_df["week_start"], errors="coerce").dt.normalize()
+
+        weekly_actual = rides_to_weekly_summary(rides_df)
+        if not weekly_actual.empty:
+            weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"], errors="coerce").dt.normalize()
+        else:
+            weekly_actual = pd.DataFrame(columns=["week_start", "actual_km", "actual_hours", "rides_count"])
+            weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"])
+
+        if plan_df.empty and weekly_actual.empty:
+            st.info("No plan or rides yet. Add rides or import a plan on the Plan tab.")
+            return
+
+        if plan_df.empty:
+            merged = weekly_actual.copy()
+        elif weekly_actual.empty:
+            merged = plan_df.copy()
+        else:
+            merged = pd.merge(plan_df, weekly_actual, on="week_start", how="outer").sort_values("week_start")
+
+        for c in ["planned_km", "planned_hours", "actual_km", "actual_hours", "rides_count"]:
+            if c in merged.columns:
+                merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0)
+
+        if "planned_km" in merged.columns and "actual_km" in merged.columns:
+            merged["km_variance"] = merged["actual_km"] - merged["planned_km"]
+        if "planned_hours" in merged.columns and "actual_hours" in merged.columns:
+            merged["hours_variance"] = merged["actual_hours"] - merged["planned_hours"]
+
+        st.dataframe(merged, use_container_width=True)
+
     st.subheader("Plan vs actual (weekly)")
     st.caption(
         "Switch between coach and patient layouts to change the dashboard arrangement without changing access."
@@ -728,7 +764,115 @@ with tab2:
     st.divider()
 
     if st.session_state["view_mode"] == "coach":
-        _render_weekly_section()
+        rides = db.fetch_rides_for_user(user_id, role, pid)
+        rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
+
+        plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
+        plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
+
+        latest_block = db.fetch_latest_sc_block_for_user(user_id, role, pid)
+
+        st.subheader("Overview")
+        c1, c2, c3, c4 = st.columns(4)
+
+        total_rides = len(rides_df)
+        total_km = float(rides_df["distance_km"].sum()) if not rides_df.empty else 0.0
+        total_hours = float(rides_df["duration_min"].sum()) / 60.0 if not rides_df.empty else 0.0
+        if plan_df.empty:
+            planned_km = 0.0
+            planned_hours = 0.0
+        else:
+            planned_km = float(pd.to_numeric(plan_df["planned_km"], errors="coerce").fillna(0).sum())
+            planned_hours = float(pd.to_numeric(plan_df["planned_hours"], errors="coerce").fillna(0).sum())
+
+        if latest_block is None:
+            block_label = "None"
+            block_delta = "No blocks"
+        else:
+            block_id, _, weeks, _, _, spw, _, _, _ = latest_block
+            block_label = f"#{block_id}"
+            block_delta = f"{weeks}w · {spw}x/wk"
+
+        with c1:
+            st.metric("Rides logged", f"{total_rides}")
+        with c2:
+            st.metric("Actual volume", f"{total_km:.1f} km", f"{total_hours:.1f} hrs")
+        with c3:
+            st.metric("Planned volume", f"{planned_km:.1f} km", f"{planned_hours:.1f} hrs")
+        with c4:
+            st.metric("Latest S&C block", block_label, block_delta)
+
+        st.divider()
+        _render_weekly_section_from_frames(rides_df, plan_df)
+
+        st.divider()
+        st.subheader("Ride log")
+        if rides_df.empty:
+            st.caption("No rides logged yet.")
+        else:
+            st.dataframe(rides_df, use_container_width=True)
+
+        st.divider()
+        st.subheader("Upload plan (preview)")
+        st.caption("Preview plan CSVs here. Save changes from the Plan Import / Edit tab.")
+        uploaded_preview = st.file_uploader("Upload plan CSV", type=["csv"], key="plan_csv_preview")
+        if uploaded_preview is not None:
+            try:
+                preview_df = parse_plan_csv(uploaded_preview)
+                st.success(f"Loaded {len(preview_df)} plan rows.")
+                st.dataframe(preview_df, use_container_width=True)
+            except Exception as exc:
+                st.error(f"Plan import error: {exc}")
+
+        st.divider()
+        st.subheader("S&C blocks")
+        if latest_block is None:
+            st.info("No S&C block created yet.")
+        else:
+            block_id, start_date_s, weeks, model, deload_wk, spw, goal_s, notes_s, created_at = latest_block
+            st.caption(
+                f"Block #{block_id} | Start {start_date_s} | {weeks}w | deload week {deload_wk} | "
+                f"{spw} sessions/wk | goal={goal_s}"
+            )
+
+            detail = db.fetch_sc_block_detail_for_user(user_id, role, block_id)
+            for (wk_no, wk_start, focus, is_deload, label, day_hint, exs) in detail:
+                exp_label = f"Week {wk_no} ({wk_start}) - Session {label} {'(DELOAD)' if is_deload else ''}"
+                with st.expander(exp_label, expanded=(wk_no == 1)):
+                    if not exs:
+                        st.info("No exercises found for this session.")
+                        continue
+
+                    ex_rows = []
+                    for ex in exs:
+                        (
+                            _row_id,
+                            ex_name,
+                            sets_t,
+                            reps_t,
+                            pct_t,
+                            load_t,
+                            rpe_t,
+                            rest_t,
+                            intent,
+                            n_notes,
+                            _sets_a,
+                            _reps_a,
+                            _load_a,
+                            _completed,
+                            _a_notes,
+                        ) = ex
+                        ex_rows.append(
+                            {
+                                "Exercise": ex_name,
+                                "Target": f"{sets_t} x {reps_t}",
+                                "%1RM": pct_t if pct_t is not None else "n/a",
+                                "Load (kg)": load_t if load_t is not None else "n/a",
+                                "Notes": n_notes or "",
+                            }
+                        )
+                    st.dataframe(pd.DataFrame(ex_rows), use_container_width=True)
+
         st.divider()
         _render_strava_section()
     else:
