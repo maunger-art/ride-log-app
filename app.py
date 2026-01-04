@@ -420,7 +420,21 @@ if st.sidebar.button("Sign out"):
         st.session_state.pop("auth_session", None)
     st.rerun()
 
-st.title("Ride Log – Plan vs Actual")
+if "view_mode" not in st.session_state:
+    st.session_state["view_mode"] = "coach"
+
+header_col, view_col = st.columns([4, 1])
+with header_col:
+    st.title("Ride Log – Plan vs Actual")
+with view_col:
+    st.radio(
+        "View mode",
+        options=["coach", "patient"],
+        format_func=lambda mode: "Coach view" if mode == "coach" else "Patient view",
+        horizontal=True,
+        key="view_mode",
+        label_visibility="collapsed",
+    )
 
 
 # -------------------------------------------------------------------
@@ -584,136 +598,143 @@ with tab1:
 # TAB 2: Dashboard (Plan vs Actual + Strava)
 # -------------------------------------------------------------------
 with tab2:
+    def _render_strava_section():
+        st.subheader("Strava (import actual rides)")
+
+        qp = st.query_params
+        if "code" in qp and "state" in qp:
+            if str(qp["state"]) == str(pid):
+                data = exchange_code_for_token(qp["code"])
+                db.save_strava_tokens_for_user(
+                    user_id,
+                    role,
+                    pid,
+                    data["access_token"],
+                    data["refresh_token"],
+                    int(data["expires_at"]),
+                    data.get("athlete", {}).get("id"),
+                    str(data.get("scope")),
+                )
+                st.success("Strava connected.")
+                st.query_params.clear()
+                st.rerun()
+            else:
+                st.warning("Strava callback state did not match the selected patient. Please try again.")
+                st.query_params.clear()
+                st.rerun()
+
+        token_row = db.get_strava_tokens_for_user(user_id, role, pid)
+
+        if token_row is None:
+            try:
+                st.link_button("Connect Strava", build_auth_url(state=str(pid)))
+                st.caption("Connect Strava to automatically import rides into the log.")
+            except Exception as exc:
+                st.error(str(exc))
+        else:
+            access_token, refresh_token, expires_at, athlete_id, scope, refreshed = ensure_fresh_token(token_row)
+            if refreshed:
+                db.save_strava_tokens_for_user(user_id, role, pid, access_token, refresh_token, expires_at, athlete_id, str(scope))
+
+            days_back = st.number_input("Sync how many days back?", min_value=1, max_value=365, value=30)
+
+            if st.button("Sync Strava rides"):
+                after_epoch = int(time.time() - int(days_back) * 86400)
+                imported = 0
+                page = 1
+
+                while True:
+                    acts = list_activities(access_token, after_epoch=after_epoch, per_page=50, page=page)
+                    if not acts:
+                        break
+
+                    for a in acts:
+                        sport = a.get("sport_type") or a.get("type")
+                        if sport not in ["Ride", "VirtualRide", "EBikeRide", "GravelRide", "MountainBikeRide"]:
+                            continue
+
+                        act_id = int(a["id"])
+                        if db.is_activity_synced_for_user(user_id, role, pid, act_id):
+                            continue
+
+                        ride_date_str = a["start_date_local"][:10]  # YYYY-MM-DD
+                        distance_km_val = float(a.get("distance", 0)) / 1000.0
+                        duration_min_val = int(round(float(a.get("elapsed_time", 0)) / 60.0))
+                        name = a.get("name", "Strava ride")
+
+                        db.add_ride_for_user(
+                            user_id,
+                            role,
+                            pid,
+                            ride_date_str,
+                            distance_km_val,
+                            duration_min_val,
+                            None,
+                            f"[Strava] {name}",
+                        )
+
+                        db.mark_activity_synced_for_user(user_id, role, pid, act_id)
+                        imported += 1
+
+                    page += 1
+
+                st.success(f"Imported {imported} new Strava rides.")
+                st.rerun()
+
+    def _render_weekly_section():
+        st.subheader("Weekly plan vs actual")
+
+        rides = db.fetch_rides_for_user(user_id, role, pid)
+        rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
+
+        plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
+        plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
+
+        if not plan_df.empty:
+            plan_df["week_start"] = pd.to_datetime(plan_df["week_start"], errors="coerce").dt.normalize()
+
+        weekly_actual = rides_to_weekly_summary(rides_df)
+        if not weekly_actual.empty:
+            weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"], errors="coerce").dt.normalize()
+        else:
+            weekly_actual = pd.DataFrame(columns=["week_start", "actual_km", "actual_hours", "rides_count"])
+            weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"])
+
+        if plan_df.empty and weekly_actual.empty:
+            st.info("No plan or rides yet. Add rides or import a plan on the Plan tab.")
+        else:
+            if plan_df.empty:
+                merged = weekly_actual.copy()
+            elif weekly_actual.empty:
+                merged = plan_df.copy()
+            else:
+                merged = pd.merge(plan_df, weekly_actual, on="week_start", how="outer").sort_values("week_start")
+
+            for c in ["planned_km", "planned_hours", "actual_km", "actual_hours", "rides_count"]:
+                if c in merged.columns:
+                    merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0)
+
+            if "planned_km" in merged.columns and "actual_km" in merged.columns:
+                merged["km_variance"] = merged["actual_km"] - merged["planned_km"]
+            if "planned_hours" in merged.columns and "actual_hours" in merged.columns:
+                merged["hours_variance"] = merged["actual_hours"] - merged["planned_hours"]
+
+            st.dataframe(merged, use_container_width=True)
+
     st.subheader("Plan vs actual (weekly)")
-
-    # -----------------------------
-    # STRAVA CONNECT + SYNC
-    # -----------------------------
+    st.caption(
+        "Switch between coach and patient layouts to change the dashboard arrangement without changing access."
+    )
     st.divider()
-    st.subheader("Strava (import actual rides)")
 
-    qp = st.query_params
-    if "code" in qp and "state" in qp:
-        if str(qp["state"]) == str(pid):
-            data = exchange_code_for_token(qp["code"])
-            db.save_strava_tokens_for_user(
-                user_id,
-                role,
-                pid,
-                data["access_token"],
-                data["refresh_token"],
-                int(data["expires_at"]),
-                data.get("athlete", {}).get("id"),
-                str(data.get("scope")),
-            )
-            st.success("Strava connected.")
-            st.query_params.clear()
-            st.rerun()
-        else:
-            st.warning("Strava callback state did not match the selected patient. Please try again.")
-            st.query_params.clear()
-            st.rerun()
-
-    token_row = db.get_strava_tokens_for_user(user_id, role, pid)
-
-    if token_row is None:
-        try:
-            st.link_button("Connect Strava", build_auth_url(state=str(pid)))
-            st.caption("Connect Strava to automatically import rides into the log.")
-        except Exception as exc:
-            st.error(str(exc))
+    if st.session_state["view_mode"] == "coach":
+        _render_weekly_section()
+        st.divider()
+        _render_strava_section()
     else:
-        access_token, refresh_token, expires_at, athlete_id, scope, refreshed = ensure_fresh_token(token_row)
-        if refreshed:
-            db.save_strava_tokens_for_user(user_id, role, pid, access_token, refresh_token, expires_at, athlete_id, str(scope))
-
-        days_back = st.number_input("Sync how many days back?", min_value=1, max_value=365, value=30)
-
-        if st.button("Sync Strava rides"):
-            after_epoch = int(time.time() - int(days_back) * 86400)
-            imported = 0
-            page = 1
-
-            while True:
-                acts = list_activities(access_token, after_epoch=after_epoch, per_page=50, page=page)
-                if not acts:
-                    break
-
-                for a in acts:
-                    sport = a.get("sport_type") or a.get("type")
-                    if sport not in ["Ride", "VirtualRide", "EBikeRide", "GravelRide", "MountainBikeRide"]:
-                        continue
-
-                    act_id = int(a["id"])
-                    if db.is_activity_synced_for_user(user_id, role, pid, act_id):
-                        continue
-
-                    ride_date_str = a["start_date_local"][:10]  # YYYY-MM-DD
-                    distance_km_val = float(a.get("distance", 0)) / 1000.0
-                    duration_min_val = int(round(float(a.get("elapsed_time", 0)) / 60.0))
-                    name = a.get("name", "Strava ride")
-
-                    db.add_ride_for_user(
-                        user_id,
-                        role,
-                        pid,
-                        ride_date_str,
-                        distance_km_val,
-                        duration_min_val,
-                        None,
-                        f"[Strava] {name}",
-                    )
-
-                    db.mark_activity_synced_for_user(user_id, role, pid, act_id)
-                    imported += 1
-
-                page += 1
-
-            st.success(f"Imported {imported} new Strava rides.")
-            st.rerun()
-
-    # -----------------------------
-    # PLAN VS ACTUAL (WEEKLY)
-    # -----------------------------
-    st.divider()
-    st.subheader("Weekly plan vs actual")
-
-    rides = db.fetch_rides_for_user(user_id, role, pid)
-    rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
-
-    plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
-    plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
-
-    if not plan_df.empty:
-        plan_df["week_start"] = pd.to_datetime(plan_df["week_start"], errors="coerce").dt.normalize()
-
-    weekly_actual = rides_to_weekly_summary(rides_df)
-    if not weekly_actual.empty:
-        weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"], errors="coerce").dt.normalize()
-    else:
-        weekly_actual = pd.DataFrame(columns=["week_start", "actual_km", "actual_hours", "rides_count"])
-        weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"])
-
-    if plan_df.empty and weekly_actual.empty:
-        st.info("No plan or rides yet. Add rides or import a plan on the Plan tab.")
-    else:
-        if plan_df.empty:
-            merged = weekly_actual.copy()
-        elif weekly_actual.empty:
-            merged = plan_df.copy()
-        else:
-            merged = pd.merge(plan_df, weekly_actual, on="week_start", how="outer").sort_values("week_start")
-
-        for c in ["planned_km", "planned_hours", "actual_km", "actual_hours", "rides_count"]:
-            if c in merged.columns:
-                merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0)
-
-        if "planned_km" in merged.columns and "actual_km" in merged.columns:
-            merged["km_variance"] = merged["actual_km"] - merged["planned_km"]
-        if "planned_hours" in merged.columns and "actual_hours" in merged.columns:
-            merged["hours_variance"] = merged["actual_hours"] - merged["planned_hours"]
-
-        st.dataframe(merged, use_container_width=True)
+        _render_strava_section()
+        st.divider()
+        _render_weekly_section()
 
 
 # -------------------------------------------------------------------
