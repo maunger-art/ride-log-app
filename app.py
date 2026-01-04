@@ -59,6 +59,14 @@ def _age_from_dob_or_manual(dob_str: str, manual_age: int) -> int:
     return int(manual_age)
 
 
+def _to_none(value):
+    if isinstance(value, str) and not value.strip():
+        return None
+    if pd.isna(value):
+        return None
+    return value
+
+
 def _parse_exercise_style(ex_row) -> str:
     """
     Heuristic to decide progression behaviour:
@@ -514,15 +522,19 @@ with tab3:
 
                 if st.button("Save plan to patient", key="save_plan_btn"):
                     for _, row in df.iterrows():
+                        planned_km_value = _to_none(row.get("planned_km"))
+                        planned_hours_value = _to_none(row.get("planned_hours"))
+                        phase_value = _to_none(row.get("phase"))
+                        notes_value = _to_none(row.get("notes"))
                         db.upsert_week_plan_for_user(
                             user_id,
                             role,
                             pid,
                             row["week_start"].isoformat(),
-                            float(row["planned_km"]) if "planned_km" in df.columns and pd.notna(row.get("planned_km")) else None,
-                            float(row["planned_hours"]) if "planned_hours" in df.columns and pd.notna(row.get("planned_hours")) else None,
-                            str(row["phase"]) if "phase" in df.columns and pd.notna(row.get("phase")) else None,
-                            str(row["notes"]) if "notes" in df.columns and pd.notna(row.get("notes")) else None,
+                            float(planned_km_value) if planned_km_value is not None else None,
+                            float(planned_hours_value) if planned_hours_value is not None else None,
+                            str(phase_value) if phase_value is not None else None,
+                            str(notes_value) if notes_value is not None else None,
                         )
                     st.success("Plan saved.")
                     st.rerun()
