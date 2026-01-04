@@ -460,18 +460,8 @@ def upsert_patient(name: str, owner_user_id: Optional[str] = None) -> int:
             (name, owner_user_id),
         )
         pid = int(cur.lastrowid)
-        if owner_user_id is not None:
-            cur.execute("""
-                INSERT OR IGNORE INTO patient_access(user_id, patient_id, access_level)
-                VALUES (?, ?, 'client')
-            """, (owner_user_id, pid))
     else:
         pid = int(row[0])
-        if owner_user_id is not None:
-            cur.execute("""
-                INSERT OR IGNORE INTO patient_access(user_id, patient_id, access_level)
-                VALUES (?, ?, 'client')
-            """, (owner_user_id, pid))
     conn.commit()
     conn.close()
     return pid
@@ -575,10 +565,6 @@ def assign_patient_to_coach(coach_user_id: str, patient_id: int) -> None:
     cur.execute("""
         INSERT OR IGNORE INTO coach_patient_access(coach_user_id, patient_id)
         VALUES (?, ?)
-    """, (coach_user_id, int(patient_id)))
-    cur.execute("""
-        INSERT OR IGNORE INTO patient_access(user_id, patient_id, access_level)
-        VALUES (?, ?, 'coach')
     """, (coach_user_id, int(patient_id)))
     conn.commit()
     conn.close()
@@ -693,37 +679,16 @@ def list_patients_for_user(user_id: str, role: str) -> List[Tuple[int, str]]:
 
 
 def _user_can_access_patient(cur: sqlite3.Cursor, user_id: str, role: str, patient_id: int) -> bool:
-    if role not in {"coach", "client"}:
+    if role not in {"coach", "client", "super_admin"}:
         return False
-    if _table_exists(cur, "patient_access"):
-        cur.execute("""
-            SELECT 1
-            FROM patients p
-            LEFT JOIN coach_patient_access cpa
-                ON cpa.patient_id = p.id AND cpa.coach_user_id = ?
-            LEFT JOIN organization_coaches oc
-                ON oc.owner_user_id = p.owner_user_id AND oc.coach_user_id = ?
-            WHERE p.id = ?
-              AND (cpa.coach_user_id IS NOT NULL OR oc.coach_user_id IS NOT NULL)
-            LIMIT 1
-        """, (user_id, user_id, int(patient_id)))
-        return cur.fetchone() is not None
-    if role == "super_admin":
-        cur.execute("""
-            SELECT 1
-            FROM coach_patient_access
-            WHERE coach_user_id = ? AND patient_id = ?
-            LIMIT 1
-        """, (user_id, int(patient_id)))
-        return cur.fetchone() is not None
-    if role == "coach":
-        cur.execute("""
-            SELECT 1
-            FROM coach_patient_access
-            WHERE coach_user_id = ? AND patient_id = ?
-            LIMIT 1
-        """, (user_id, int(patient_id)))
-        return cur.fetchone() is not None
+    cur.execute("""
+        SELECT 1
+        FROM coach_patient_access
+        WHERE coach_user_id = ? AND patient_id = ?
+        LIMIT 1
+    """, (user_id, int(patient_id)))
+    if cur.fetchone() is not None:
+        return True
     cur.execute("""
         SELECT 1
         FROM patients
