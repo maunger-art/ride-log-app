@@ -478,6 +478,29 @@ def _get_block_patient_id(cur: sqlite3.Cursor, block_id: int) -> Optional[int]:
     return None if row is None else int(row[0])
 
 
+def _get_week_patient_id(cur: sqlite3.Cursor, week_id: int) -> Optional[int]:
+    cur.execute("""
+        SELECT b.patient_id
+        FROM sc_weeks w
+        JOIN sc_blocks b ON b.id = w.block_id
+        WHERE w.id = ?
+    """, (int(week_id),))
+    row = cur.fetchone()
+    return None if row is None else int(row[0])
+
+
+def _get_session_patient_id(cur: sqlite3.Cursor, session_id: int) -> Optional[int]:
+    cur.execute("""
+        SELECT b.patient_id
+        FROM sc_sessions s
+        JOIN sc_weeks w ON w.id = s.week_id
+        JOIN sc_blocks b ON b.id = w.block_id
+        WHERE s.id = ?
+    """, (int(session_id),))
+    row = cur.fetchone()
+    return None if row is None else int(row[0])
+
+
 def _get_session_exercise_patient_id(cur: sqlite3.Cursor, row_id: int) -> Optional[int]:
     cur.execute("""
         SELECT b.patient_id
@@ -502,6 +525,32 @@ def _assert_block_access(user_id: str, role: str, block_id: int) -> None:
     conn.close()
     if not ok:
         raise PermissionError("User is not permitted to access this block.")
+
+
+def _assert_week_access(user_id: str, role: str, week_id: int) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    patient_id = _get_week_patient_id(cur, week_id)
+    if patient_id is None:
+        conn.close()
+        raise ValueError("Week not found.")
+    ok = _user_can_access_patient(cur, user_id, role, patient_id)
+    conn.close()
+    if not ok:
+        raise PermissionError("User is not permitted to access this week.")
+
+
+def _assert_session_access(user_id: str, role: str, session_id: int) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    patient_id = _get_session_patient_id(cur, session_id)
+    if patient_id is None:
+        conn.close()
+        raise ValueError("Session not found.")
+    ok = _user_can_access_patient(cur, user_id, role, patient_id)
+    conn.close()
+    if not ok:
+        raise PermissionError("User is not permitted to access this session.")
 
 
 def add_ride_for_user(
@@ -684,11 +733,13 @@ def upsert_sc_session_for_user(
     notes: Optional[str] = None,
 ) -> int:
     _assert_coach(role)
+    _assert_week_access(user_id, role, week_id)
     return upsert_sc_session(week_id, session_label, day_hint, notes)
 
 
 def clear_sc_session_exercises_for_user(user_id: str, role: str, session_id: int) -> None:
     _assert_coach(role)
+    _assert_session_access(user_id, role, session_id)
     clear_sc_session_exercises(session_id)
 
 
@@ -707,6 +758,7 @@ def add_sc_session_exercise_for_user(
     notes: Optional[str],
 ) -> int:
     _assert_coach(role)
+    _assert_session_access(user_id, role, session_id)
     return add_sc_session_exercise(
         session_id,
         exercise_id,
