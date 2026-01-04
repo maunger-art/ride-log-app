@@ -19,7 +19,12 @@
 - Can review actuals vs targets
 - Cannot see patients not explicitly assigned
 
+### Super Admin (Account Owner)
+- Owns the organisation account
+- Can view and manage all patients in the organisation
+- Can add/remove coaches in the organisation
+- Has coach-level edit permissions
+
 ## Access Control
 - Enforced both in UI and database layer
 - All patient access validated via role mapping
-
