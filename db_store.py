@@ -720,10 +720,10 @@ def _user_can_access_patient(cur: sqlite3.Cursor, user_id: str, role: str, patie
     if role == "super_admin":
         cur.execute("""
             SELECT 1
-            FROM patients
-            WHERE id = ? AND owner_user_id = ?
+            FROM coach_patient_access
+            WHERE coach_user_id = ? AND patient_id = ?
             LIMIT 1
-        """, (int(patient_id), user_id))
+        """, (user_id, int(patient_id)))
         return cur.fetchone() is not None
     if role == "coach":
         cur.execute("""
