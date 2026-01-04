@@ -174,6 +174,33 @@ def get_supabase_client() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def _store_auth_state(response) -> dict:
+    session = response.session
+    user = response.user
+    if not user:
+        raise ValueError("Authentication response missing user.")
+    st.session_state["auth_user"] = {"id": user.id, "email": user.email}
+    st.session_state["auth_session"] = {
+        "access_token": session.access_token if session else None,
+        "refresh_token": session.refresh_token if session else None,
+    }
+    return st.session_state["auth_user"]
+
+
+def _restore_auth_session(client: Client) -> Optional[dict]:
+    session_state = st.session_state.get("auth_session") or {}
+    refresh_token = session_state.get("refresh_token")
+    if not refresh_token:
+        return None
+    try:
+        response = client.auth.refresh_session(refresh_token)
+        return _store_auth_state(response)
+    except Exception:
+        st.session_state.pop("auth_session", None)
+        st.session_state.pop("auth_user", None)
+        return None
+
+
 def require_authenticated_user() -> dict:
     if not SUPABASE_URL or not SUPABASE_KEY:
         st.error("Supabase configuration missing. Set SUPABASE_URL and SUPABASE_KEY.")
@@ -218,14 +245,8 @@ def require_authenticated_user() -> dict:
             submitted = st.form_submit_button("Sign in")
         if submitted:
             try:
-                client = get_supabase_client()
                 response = client.auth.sign_in_with_password({"email": email, "password": password})
-                user = response.user
-                st.session_state["auth_user"] = {"id": user.id, "email": user.email}
-                st.session_state["auth_session"] = {
-                    "access_token": response.session.access_token if response.session else None,
-                    "refresh_token": response.session.refresh_token if response.session else None,
-                }
+                _store_auth_state(response)
                 st.rerun()
             except Exception as exc:
                 st.error(f"Sign in failed: {exc}")
@@ -283,8 +304,12 @@ if role not in ["client", "coach"]:
 st.sidebar.caption(f"Signed in as {user_email}")
 st.sidebar.caption(f"Role: {role}")
 if st.sidebar.button("Sign out"):
-    st.session_state.pop("auth_user", None)
-    st.session_state.pop("auth_session", None)
+    client = get_supabase_client()
+    try:
+        client.auth.sign_out()
+    finally:
+        st.session_state.pop("auth_user", None)
+        st.session_state.pop("auth_session", None)
     st.rerun()
 
 st.title("Ride Log – Plan vs Actual")
