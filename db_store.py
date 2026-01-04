@@ -149,6 +149,16 @@ def init_db() -> None:
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS client_invites (
+        email TEXT PRIMARY KEY,
+        patient_id INTEGER NOT NULL,
+        coach_user_id TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS rides (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         patient_id INTEGER NOT NULL,
@@ -517,6 +527,78 @@ def assign_patient_to_coach(coach_user_id: str, patient_id: int) -> None:
     """, (coach_user_id, int(patient_id)))
     conn.commit()
     conn.close()
+
+
+def set_patient_owner(patient_id: int, owner_user_id: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE patients
+        SET owner_user_id = ?
+        WHERE id = ?
+    """, (owner_user_id, int(patient_id)))
+    conn.commit()
+    conn.close()
+
+
+def create_client_invite(email: str, patient_id: int, coach_user_id: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO client_invites(email, patient_id, coach_user_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+            patient_id=excluded.patient_id,
+            coach_user_id=excluded.coach_user_id,
+            created_at=datetime('now')
+    """, (email.lower(), int(patient_id), coach_user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_client_invite(email: str) -> Optional[Tuple[int, str]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT patient_id, coach_user_id
+        FROM client_invites
+        WHERE email = ?
+        LIMIT 1
+    """, (email.lower(),))
+    row = cur.fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return int(row[0]), str(row[1])
+
+
+def claim_client_invite(email: str, user_id: str) -> Optional[int]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT patient_id, coach_user_id
+        FROM client_invites
+        WHERE email = ?
+        LIMIT 1
+    """, (email.lower(),))
+    row = cur.fetchone()
+    if row is None:
+        conn.close()
+        return None
+    patient_id, coach_user_id = int(row[0]), str(row[1])
+    cur.execute("""
+        UPDATE patients
+        SET owner_user_id = ?
+        WHERE id = ? AND owner_user_id IS NULL
+    """, (user_id, patient_id))
+    cur.execute("""
+        INSERT OR IGNORE INTO coach_patient_access(coach_user_id, patient_id)
+        VALUES (?, ?)
+    """, (coach_user_id, patient_id))
+    cur.execute("DELETE FROM client_invites WHERE email = ?", (email.lower(),))
+    conn.commit()
+    conn.close()
+    return patient_id
 
 
 def list_patients_for_user(user_id: str, role: str) -> List[Tuple[int, str]]:
