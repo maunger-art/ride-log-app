@@ -16,6 +16,7 @@ st.set_page_config(
 # -------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+SUPABASE_EMAIL_REDIRECT = os.environ.get("SUPABASE_EMAIL_REDIRECT", "")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("Supabase environment variables are not set.")
@@ -173,50 +174,133 @@ def get_supabase_client() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def _store_auth_state(response) -> dict:
+    session = response.session
+    user = response.user
+    if not user:
+        raise ValueError("Authentication response missing user.")
+    st.session_state["auth_user"] = {"id": user.id, "email": user.email}
+    st.session_state["auth_session"] = {
+        "access_token": session.access_token if session else None,
+        "refresh_token": session.refresh_token if session else None,
+    }
+    return st.session_state["auth_user"]
+
+
+def _restore_auth_session(client: Client) -> Optional[dict]:
+    session_state = st.session_state.get("auth_session") or {}
+    refresh_token = session_state.get("refresh_token")
+    if not refresh_token:
+        return None
+    try:
+        response = client.auth.refresh_session(refresh_token)
+        return _store_auth_state(response)
+    except Exception:
+        st.session_state.pop("auth_session", None)
+        st.session_state.pop("auth_user", None)
+        return None
+
+
+def _email_suffix(email: str) -> str:
+    parts = (email or "").strip().lower().split("@", 1)
+    if len(parts) != 2:
+        return ""
+    return parts[1]
+
+
 def require_authenticated_user() -> dict:
     if not SUPABASE_URL or not SUPABASE_KEY:
         st.error("Supabase configuration missing. Set SUPABASE_URL and SUPABASE_KEY.")
         st.stop()
 
+    client = get_supabase_client()
+
     if "auth_user" in st.session_state:
         return st.session_state["auth_user"]
 
+    qp = st.query_params
+    if "token" in qp or "token_hash" in qp:
+        try:
+            otp_type = qp.get("type", "magiclink")
+            params = {"type": otp_type}
+            if "token_hash" in qp:
+                params["token_hash"] = qp["token_hash"]
+            else:
+                params["token"] = qp["token"]
+            if "email" in qp:
+                params["email"] = qp["email"]
+            response = client.auth.verify_otp(params)
+            user = response.user
+            st.session_state["auth_user"] = {"id": user.id, "email": user.email}
+            st.session_state["auth_session"] = {
+                "access_token": response.session.access_token if response.session else None,
+                "refresh_token": response.session.refresh_token if response.session else None,
+            }
+            st.query_params.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Email sign in failed: {exc}")
+
     st.title("Sign in")
-    st.caption("Use your email and password to access the Ride Log.")
+    st.caption("Coaches sign in with email and password. Clients receive a login email.")
 
-    tab_sign_in, tab_sign_up = st.tabs(["Sign in", "Sign up"])
+    tab_coach, tab_client, tab_create = st.tabs(
+        ["Coach sign in", "Client login email", "Create account"]
+    )
 
-    with tab_sign_in:
+    with tab_coach:
         with st.form("sign_in_form", clear_on_submit=False):
             email = st.text_input("Email", key="sign_in_email")
             password = st.text_input("Password", type="password", key="sign_in_password")
             submitted = st.form_submit_button("Sign in")
         if submitted:
             try:
-                client = get_supabase_client()
                 response = client.auth.sign_in_with_password({"email": email, "password": password})
-                user = response.user
-                st.session_state["auth_user"] = {"id": user.id, "email": user.email}
-                st.session_state["auth_session"] = {
-                    "access_token": response.session.access_token if response.session else None,
-                    "refresh_token": response.session.refresh_token if response.session else None,
-                }
+                _store_auth_state(response)
                 st.rerun()
             except Exception as exc:
                 st.error(f"Sign in failed: {exc}")
 
-    with tab_sign_up:
-        with st.form("sign_up_form", clear_on_submit=False):
-            email = st.text_input("Email", key="sign_up_email")
-            password = st.text_input("Password", type="password", key="sign_up_password")
+    with tab_client:
+        with st.form("client_login_form", clear_on_submit=False):
+            email = st.text_input("Email", key="client_email")
+            submitted = st.form_submit_button("Send login email")
+        if submitted:
+            if not email.strip():
+                st.error("Enter your email to receive a login link.")
+            else:
+                try:
+                    client = get_supabase_client()
+                    options = {}
+                    if SUPABASE_EMAIL_REDIRECT:
+                        options["email_redirect_to"] = SUPABASE_EMAIL_REDIRECT
+                    payload = {"email": email.strip()}
+                    if options:
+                        payload["options"] = options
+                    client.auth.sign_in_with_otp(payload)
+                    st.success("Check your email for the login link.")
+                except Exception as exc:
+                    st.error(f"Email sign in failed: {exc}")
+
+    with tab_create:
+        with st.form("create_account_form", clear_on_submit=False):
+            email = st.text_input("Work email", key="create_account_email")
+            password = st.text_input("Password", type="password", key="create_account_password")
             submitted = st.form_submit_button("Create account")
         if submitted:
-            try:
-                client = get_supabase_client()
-                client.auth.sign_up({"email": email, "password": password})
-                st.success("Check your email to confirm your account, then sign in.")
-            except Exception as exc:
-                st.error(f"Sign up failed: {exc}")
+            if not email.strip() or not password:
+                st.error("Enter an email and password to create an account.")
+            else:
+                try:
+                    response = client.auth.sign_up(
+                        {"email": email.strip(), "password": password}
+                    )
+                    if response.session:
+                        _store_auth_state(response)
+                        st.rerun()
+                    st.success("Account created. Check your email to confirm if prompted.")
+                except Exception as exc:
+                    st.error(f"Account creation failed: {exc}")
 
     st.stop()
 
@@ -232,21 +316,39 @@ user_id = auth_user["id"]
 user_email = auth_user.get("email") or "Unknown"
 
 role = db.get_user_role(user_id)
+if not role and user_email:
+    email_suffix = _email_suffix(user_email)
+    if email_suffix:
+        existing_owner = db.get_owner_for_email_suffix(email_suffix)
+        if existing_owner is None or existing_owner == user_id:
+            db.register_owner_email_suffix(user_id, email_suffix)
+            db.upsert_user_role(user_id, "super_admin")
+            role = "super_admin"
+
+if role not in ["client", "coach"] and user_email:
+    claimed_patient = db.claim_client_invite(user_email, user_id)
+    if claimed_patient is not None:
+        db.upsert_user_role(user_id, "client")
+        role = "client"
+
 if role not in ["client", "coach"]:
-    st.title("Choose your role")
-    st.info("Select a role to finish setting up your account.")
-    role_choice = st.selectbox("Role", options=["client", "coach"], key="role_choice")
-    if st.button("Save role"):
-        db.upsert_user_role(user_id, role_choice)
-        st.success("Role saved. Reloading...")
+    st.title("Coach setup")
+    st.info("Coaches create client accounts. Clients should use the email login link from their coach.")
+    if st.button("Set up coach account"):
+        db.upsert_user_role(user_id, "coach")
+        st.success("Coach role saved. Reloading...")
         st.rerun()
     st.stop()
 
 st.sidebar.caption(f"Signed in as {user_email}")
 st.sidebar.caption(f"Role: {role}")
 if st.sidebar.button("Sign out"):
-    st.session_state.pop("auth_user", None)
-    st.session_state.pop("auth_session", None)
+    client = get_supabase_client()
+    try:
+        client.auth.sign_out()
+    finally:
+        st.session_state.pop("auth_user", None)
+        st.session_state.pop("auth_session", None)
     st.rerun()
 
 st.title("Ride Log – Plan vs Actual")
@@ -262,12 +364,7 @@ pid = None
 
 if role == "client":
     if not patients:
-        default_name = user_email.split("@")[0] if "@" in user_email else ""
-        new_name = st.sidebar.text_input("Enter your name", value=default_name)
-        if st.sidebar.button("Create your patient profile") and new_name.strip():
-            pid = db.upsert_patient(new_name.strip(), owner_user_id=user_id)
-            st.sidebar.success("Profile created.")
-            st.rerun()
+        st.sidebar.info("Your coach has not added your profile yet.")
         st.stop()
 
     if len(names) == 1:
@@ -280,23 +377,76 @@ else:
     selected = st.sidebar.selectbox("Select patient", options=["(New patient)"] + names)
     if selected == "(New patient)":
         new_name = st.sidebar.text_input("Enter patient name")
-        if st.sidebar.button("Create patient") and new_name.strip():
-            pid = db.upsert_patient(new_name.strip())
-            db.assign_patient_to_coach(user_id, pid)
-            st.sidebar.success("Patient created and assigned.")
-            st.rerun()
+        new_email = st.sidebar.text_input("Client email")
+        if st.sidebar.button("Create patient"):
+            if not new_name.strip():
+                st.sidebar.error("Enter a patient name.")
+            elif not new_email.strip():
+                st.sidebar.error("Enter the client email.")
+            else:
+                try:
+                    owner_id = user_id if role == "super_admin" else None
+                    pid = db.upsert_patient(new_name.strip(), owner_user_id=owner_id)
+                    if role != "super_admin":
+                        db.assign_patient_to_coach(user_id, pid)
+                    db.create_client_invite(new_email.strip(), pid, user_id)
+                    client = get_supabase_client()
+                    options = {}
+                    if SUPABASE_EMAIL_REDIRECT:
+                        options["email_redirect_to"] = SUPABASE_EMAIL_REDIRECT
+                    payload = {"email": new_email.strip()}
+                    if options:
+                        payload["options"] = options
+                    client.auth.sign_in_with_otp(payload)
+                    st.sidebar.success("Patient created. Login email sent.")
+                    st.rerun()
+                except Exception as exc:
+                    st.sidebar.error(f"Failed to invite client: {exc}")
     else:
         pid = [p[0] for p in patients if p[1] == selected][0]
 
-    st.sidebar.caption("Assign existing patient by ID (coach only).")
-    assign_id = st.sidebar.text_input("Patient ID", key="assign_patient_id")
-    if st.sidebar.button("Assign patient"):
-        if assign_id.strip().isdigit():
-            db.assign_patient_to_coach(user_id, int(assign_id))
-            st.sidebar.success("Patient assigned.")
-            st.rerun()
-        else:
-            st.sidebar.error("Enter a numeric patient ID.")
+    if role == "coach":
+        st.sidebar.caption("Assign existing patient by ID (coach only).")
+        assign_id = st.sidebar.text_input("Patient ID", key="assign_patient_id")
+        if st.sidebar.button("Assign patient"):
+            if assign_id.strip().isdigit():
+                db.assign_patient_to_coach(user_id, int(assign_id))
+                st.sidebar.success("Patient assigned.")
+                st.rerun()
+            else:
+                st.sidebar.error("Enter a numeric patient ID.")
+
+if role == "super_admin":
+    st.sidebar.divider()
+    st.sidebar.subheader("Organisation")
+    st.sidebar.caption("Manage coaches in your organisation.")
+    coach_user_id = st.sidebar.text_input("Coach user ID", key="org_coach_user_id")
+    col_add, col_remove = st.sidebar.columns(2)
+    with col_add:
+        if col_add.button("Add coach", key="add_org_coach"):
+            if not coach_user_id.strip():
+                st.sidebar.error("Enter a coach user ID.")
+            elif db.get_user_role(coach_user_id.strip()) != "coach":
+                st.sidebar.error("That user does not have a coach role.")
+            else:
+                db.add_coach_to_org(user_id, coach_user_id.strip())
+                st.sidebar.success("Coach added to organisation.")
+                st.rerun()
+    with col_remove:
+        if col_remove.button("Remove coach", key="remove_org_coach"):
+            if not coach_user_id.strip():
+                st.sidebar.error("Enter a coach user ID.")
+            else:
+                db.remove_coach_from_org(user_id, coach_user_id.strip())
+                st.sidebar.success("Coach removed from organisation.")
+                st.rerun()
+
+    org_coaches = db.list_org_coaches(user_id)
+    if org_coaches:
+        st.sidebar.caption("Current coaches")
+        st.sidebar.code("\n".join(org_coaches))
+    else:
+        st.sidebar.caption("No coaches added yet.")
 
 if pid is None:
     st.warning("Please create or select a patient in the sidebar before using the app.")
@@ -504,7 +654,7 @@ with tab3:
     st.subheader("Plan import (CSV)")
     st.write("Upload a CSV with columns: week_start (Monday, YYYY-MM-DD), planned_km, planned_hours, phase, notes.")
 
-    if role != "coach":
+    if role == "client":
         st.info("Your coach manages the training plan. You can view it below.")
         plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
         plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
@@ -742,7 +892,7 @@ with tab4:
     # -----------------------------
     st.subheader("Create a block (4 / 6 / 8 weeks, hybrid progression, editable)")
 
-    if role != "coach":
+    if role == "client":
         st.info("Your coach manages S&C blocks. You can log actuals below.")
     else:
         colb1, colb2, colb3, colb4 = st.columns(4)
