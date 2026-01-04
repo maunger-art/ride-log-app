@@ -13,7 +13,12 @@ def parse_plan_csv(file) -> pd.DataFrame:
     if "week_start" not in df.columns:
         raise ValueError("Plan CSV must include at least: week_start (YYYY-MM-DD, Monday).")
 
-    df["week_start"] = pd.to_datetime(df["week_start"]).dt.date
+    week_start = pd.to_datetime(df["week_start"], errors="coerce")
+    if week_start.isna().any():
+        raise ValueError("Plan CSV has invalid week_start dates; expected YYYY-MM-DD.")
+    if not week_start.apply(lambda d: d.weekday() == 0).all():
+        raise ValueError("Plan CSV week_start dates must be Mondays.")
+    df["week_start"] = week_start.dt.date
 
     for col in ["planned_km", "planned_hours"]:
         if col in df.columns:
@@ -21,7 +26,7 @@ def parse_plan_csv(file) -> pd.DataFrame:
 
     for col in ["phase", "notes"]:
         if col in df.columns:
-            df[col] = df[col].astype(str)
+            df[col] = df[col].astype("string")
 
     return df
 
