@@ -106,12 +106,11 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 # The rest of your imports
 # -------------------------------------------------
 import pandas as pd
-import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Optional
 
-from plan import parse_plan_csv, rides_to_weekly_summary, to_monday
-from strava import build_auth_url, exchange_code_for_token, ensure_fresh_token, list_activities
+from plan import parse_plan_csv, to_monday
+import services
 import db_store as db
 
 # Optional: seed strength DB via sidebar button
@@ -142,101 +141,6 @@ def _to_none(value):
         return None
     return value
 
-
-def _parse_exercise_style(ex_row) -> str:
-    """
-    Heuristic to decide progression behaviour:
-    - Isometric/bodyweight/core: reps are seconds typically
-    - Conditioning machine: reps are minutes
-    - DB/KB: reps-first then load
-    - Barbell: load progression
-    """
-    # ex_row: (id, name, category, laterality, implement, primary_muscles, notes)
-    if not ex_row:
-        return "unknown"
-
-    _, name, category, laterality, implement, _, notes = ex_row
-    name_l = (name or "").lower()
-    cat = (category or "").lower()
-    impl = (implement or "").lower()
-    nts = (notes or "").lower()
-
-    if "isometric" in name_l or "isometric" in nts or "wall sit" in name_l or "plank" in name_l:
-        return "isometric"
-
-    if cat == "conditioning" or "bike erg" in name_l or "erg" in name_l:
-        return "conditioning"
-
-    if impl in ["dumbbell", "kettlebell", "band"]:
-        return "db_kb"
-
-    if impl in ["barbell"]:
-        return "barbell"
-
-    if impl in ["bodyweight"]:
-        return "bodyweight"
-
-    return "generic"
-
-
-def _suggest_progression(
-    style: str,
-    week_no: int,
-    deload: bool,
-    sets_base: int,
-    reps_base: int,
-    load_base: Optional[float],
-    pct_base: Optional[float],
-) -> tuple[int, int, Optional[float], Optional[float]]:
-    """
-    Default suggestion engine (editable in UI):
-    - bodyweight/isometric: increase reps/time linearly (deload reduces)
-    - DB/KB: increase reps first then load
-    - Barbell: increase load within rep range
-    """
-    # Deload rules
-    if deload:
-        # reduce volume and load slightly
-        sets_t = max(1, int(round(sets_base * 0.6)))
-        reps_t = max(1, int(round(reps_base * 0.7)))
-        load_t = None if load_base is None else round(load_base * 0.9, 1)
-        pct_t = None if pct_base is None else round(pct_base * 0.9, 3)
-        return sets_t, reps_t, load_t, pct_t
-
-    # Non-deload: progression
-    if style in ["isometric", "bodyweight"]:
-        # linear time/reps: +5 per week
-        reps_t = reps_base + (week_no - 1) * 5
-        return sets_base, reps_t, load_base, pct_base
-
-    if style == "conditioning":
-        # minutes: +1 min per week
-        reps_t = reps_base + (week_no - 1) * 1
-        return sets_base, reps_t, load_base, pct_base
-
-    if style == "db_kb":
-        # reps-first then load: add reps until 12, then +2.5kg and drop reps back to 8
-        reps_t = reps_base + (week_no - 1) * 1
-        load_t = load_base
-        if load_base is not None:
-            if reps_t > 12:
-                reps_t = 8
-                load_t = round(load_base + 2.5, 1)
-        return sets_base, reps_t, load_t, pct_base
-
-    if style == "barbell":
-        # load progression: +2.5kg per week if load known; pct +0.02 otherwise
-        load_t = load_base
-        pct_t = pct_base
-        if load_base is not None:
-            load_t = round(load_base + (week_no - 1) * 2.5, 1)
-        elif pct_base is not None:
-            pct_t = round(pct_base + (week_no - 1) * 0.02, 3)
-        return sets_base, reps_base, load_t, pct_t
-
-    # generic: gentle reps progression
-    reps_t = reps_base + (week_no - 1) * 1
-    return sets_base, reps_t, load_base, pct_base
 
 
 # -----------------------------
@@ -585,7 +489,7 @@ with tab1:
         notes = st.text_area("Notes (optional)", height=120)
 
     if st.button("Save ride"):
-        db.add_ride_for_user(
+        services.add_ride(
             user_id,
             role,
             pid,
@@ -600,7 +504,7 @@ with tab1:
 
     st.divider()
     st.subheader("Recent rides")
-    rides = db.fetch_rides_for_user(user_id, role, pid)
+    rides = services.list_rides(user_id, role, pid)
     rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
     st.dataframe(rides_df, use_container_width=True)
 
@@ -615,17 +519,7 @@ with tab2:
         qp = st.query_params
         if "code" in qp and "state" in qp:
             if str(qp["state"]) == str(pid):
-                data = exchange_code_for_token(qp["code"])
-                db.save_strava_tokens_for_user(
-                    user_id,
-                    role,
-                    pid,
-                    data["access_token"],
-                    data["refresh_token"],
-                    int(data["expires_at"]),
-                    data.get("athlete", {}).get("id"),
-                    str(data.get("scope")),
-                )
+                services.connect_strava(user_id, role, pid, qp["code"], qp["state"])
                 st.success("Strava connected.")
                 st.query_params.clear()
                 st.rerun()
@@ -634,139 +528,29 @@ with tab2:
                 st.query_params.clear()
                 st.rerun()
 
-        token_row = db.get_strava_tokens_for_user(user_id, role, pid)
+        status = services.get_strava_status(user_id, role, pid)
 
-        if token_row is None:
+        if not status.connected:
             try:
-                st.link_button("Connect Strava", build_auth_url(state=str(pid)))
+                st.link_button("Connect Strava", status.auth_url or "")
                 st.caption("Connect Strava to automatically import rides into the log.")
             except Exception as exc:
                 st.error(str(exc))
         else:
-            access_token, refresh_token, expires_at, athlete_id, scope, refreshed = ensure_fresh_token(token_row)
-            if refreshed:
-                db.save_strava_tokens_for_user(user_id, role, pid, access_token, refresh_token, expires_at, athlete_id, str(scope))
-
             days_back = st.number_input("Sync how many days back?", min_value=1, max_value=365, value=30)
 
             if st.button("Sync Strava rides"):
-                after_epoch = int(time.time() - int(days_back) * 86400)
-                imported = 0
-                page = 1
-
-                while True:
-                    acts = list_activities(access_token, after_epoch=after_epoch, per_page=50, page=page)
-                    if not acts:
-                        break
-
-                    for a in acts:
-                        sport = a.get("sport_type") or a.get("type")
-                        if sport not in ["Ride", "VirtualRide", "EBikeRide", "GravelRide", "MountainBikeRide"]:
-                            continue
-
-                        act_id = int(a["id"])
-                        if db.is_activity_synced_for_user(user_id, role, pid, act_id):
-                            continue
-
-                        ride_date_str = a["start_date_local"][:10]  # YYYY-MM-DD
-                        distance_km_val = float(a.get("distance", 0)) / 1000.0
-                        duration_min_val = int(round(float(a.get("elapsed_time", 0)) / 60.0))
-                        name = a.get("name", "Strava ride")
-
-                        db.add_ride_for_user(
-                            user_id,
-                            role,
-                            pid,
-                            ride_date_str,
-                            distance_km_val,
-                            duration_min_val,
-                            None,
-                            f"[Strava] {name}",
-                        )
-
-                        db.mark_activity_synced_for_user(user_id, role, pid, act_id)
-                        imported += 1
-
-                    page += 1
-
+                imported = services.sync_strava_rides(user_id, role, pid, int(days_back))
                 st.success(f"Imported {imported} new Strava rides.")
                 st.rerun()
 
     def _render_weekly_section():
         st.subheader("Weekly plan vs actual")
-
-        rides = db.fetch_rides_for_user(user_id, role, pid)
-        rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
-
-        plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
-        plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
-
-        if not plan_df.empty:
-            plan_df["week_start"] = pd.to_datetime(plan_df["week_start"], errors="coerce").dt.normalize()
-
-        weekly_actual = rides_to_weekly_summary(rides_df)
-        if not weekly_actual.empty:
-            weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"], errors="coerce").dt.normalize()
-        else:
-            weekly_actual = pd.DataFrame(columns=["week_start", "actual_km", "actual_hours", "rides_count"])
-            weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"])
-
-        if plan_df.empty and weekly_actual.empty:
-            st.info("No plan or rides yet. Add rides or import a plan on the Plan tab.")
-        else:
-            if plan_df.empty:
-                merged = weekly_actual.copy()
-            elif weekly_actual.empty:
-                merged = plan_df.copy()
-            else:
-                merged = pd.merge(plan_df, weekly_actual, on="week_start", how="outer").sort_values("week_start")
-
-            for c in ["planned_km", "planned_hours", "actual_km", "actual_hours", "rides_count"]:
-                if c in merged.columns:
-                    merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0)
-
-            if "planned_km" in merged.columns and "actual_km" in merged.columns:
-                merged["km_variance"] = merged["actual_km"] - merged["planned_km"]
-            if "planned_hours" in merged.columns and "actual_hours" in merged.columns:
-                merged["hours_variance"] = merged["actual_hours"] - merged["planned_hours"]
-
-            st.dataframe(merged, use_container_width=True)
-
-    def _render_weekly_section_from_frames(rides_df, plan_df):
-        st.subheader("Weekly plan vs actual")
-
-        if not plan_df.empty:
-            plan_df = plan_df.copy()
-            plan_df["week_start"] = pd.to_datetime(plan_df["week_start"], errors="coerce").dt.normalize()
-
-        weekly_actual = rides_to_weekly_summary(rides_df)
-        if not weekly_actual.empty:
-            weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"], errors="coerce").dt.normalize()
-        else:
-            weekly_actual = pd.DataFrame(columns=["week_start", "actual_km", "actual_hours", "rides_count"])
-            weekly_actual["week_start"] = pd.to_datetime(weekly_actual["week_start"])
-
-        if plan_df.empty and weekly_actual.empty:
+        weekly = services.weekly_plan_vs_actual(user_id, role, pid)
+        if weekly.empty:
             st.info("No plan or rides yet. Add rides or import a plan on the Plan tab.")
             return
-
-        if plan_df.empty:
-            merged = weekly_actual.copy()
-        elif weekly_actual.empty:
-            merged = plan_df.copy()
-        else:
-            merged = pd.merge(plan_df, weekly_actual, on="week_start", how="outer").sort_values("week_start")
-
-        for c in ["planned_km", "planned_hours", "actual_km", "actual_hours", "rides_count"]:
-            if c in merged.columns:
-                merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0)
-
-        if "planned_km" in merged.columns and "actual_km" in merged.columns:
-            merged["km_variance"] = merged["actual_km"] - merged["planned_km"]
-        if "planned_hours" in merged.columns and "actual_hours" in merged.columns:
-            merged["hours_variance"] = merged["actual_hours"] - merged["planned_hours"]
-
-        st.dataframe(merged, use_container_width=True)
+        st.dataframe(weekly, use_container_width=True)
 
     st.subheader("Plan vs actual (weekly)")
     st.caption(
@@ -775,13 +559,13 @@ with tab2:
     st.divider()
 
     if st.session_state["view_mode"] == "coach":
-        rides = db.fetch_rides_for_user(user_id, role, pid)
+        rides = services.list_rides(user_id, role, pid)
         rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
 
-        plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
+        plan_rows = services.list_week_plans(user_id, role, pid)
         plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
 
-        latest_block = db.fetch_latest_sc_block_for_user(user_id, role, pid)
+        latest_block_detail = services.latest_sc_block_with_detail(user_id, role, pid)
 
         st.subheader("Overview")
         c1, c2, c3, c4 = st.columns(4)
@@ -796,11 +580,14 @@ with tab2:
             planned_km = float(pd.to_numeric(plan_df["planned_km"], errors="coerce").fillna(0).sum())
             planned_hours = float(pd.to_numeric(plan_df["planned_hours"], errors="coerce").fillna(0).sum())
 
-        if latest_block is None:
+        if latest_block_detail is None:
             block_label = "None"
             block_delta = "No blocks"
         else:
-            block_id, _, weeks, _, _, spw, _, _, _ = latest_block
+            block = latest_block_detail["block"]
+            block_id = block["block_id"]
+            weeks = block["weeks"]
+            spw = block["sessions_per_week"]
             block_label = f"#{block_id}"
             block_delta = f"{weeks}w · {spw}x/wk"
 
@@ -814,7 +601,7 @@ with tab2:
             st.metric("Latest S&C block", block_label, block_delta)
 
         st.divider()
-        _render_weekly_section_from_frames(rides_df, plan_df)
+        _render_weekly_section()
 
         st.divider()
         st.subheader("Ride log")
@@ -838,11 +625,18 @@ with tab2:
 
         st.divider()
         st.subheader("S&C blocks")
-        if latest_block is None:
+        if latest_block_detail is None:
             st.info("No S&C block created yet.")
             st.caption("Go to the **S&C Planning** tab to create the first block.")
         else:
-            block_id, start_date_s, weeks, model, deload_wk, spw, goal_s, notes_s, created_at = latest_block
+            block = latest_block_detail["block"]
+            block_id = block["block_id"]
+            start_date_s = block["start_date"]
+            weeks = block["weeks"]
+            deload_wk = block["deload_week"]
+            spw = block["sessions_per_week"]
+            goal_s = block["goal"]
+            notes_s = block["notes"]
             st.caption(
                 f"Block #{block_id} | Start {start_date_s} | {weeks}w | deload week {deload_wk} | "
                 f"{spw} sessions/wk | goal={goal_s}"
@@ -855,20 +649,20 @@ with tab2:
         st.divider()
         _render_strava_section()
     else:
-        rides = db.fetch_rides_for_user(user_id, role, pid)
+        rides = services.list_rides(user_id, role, pid)
         rides_df = pd.DataFrame(rides, columns=["ride_date", "distance_km", "duration_min", "rpe", "notes"])
 
-        plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
+        plan_rows = services.list_week_plans(user_id, role, pid)
         plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
 
-        latest_block = db.fetch_latest_sc_block_for_user(user_id, role, pid)
+        latest_block_detail = services.latest_sc_block_with_detail(user_id, role, pid)
 
         patient_tab_plan, patient_tab_rides, patient_tab_sc, patient_tab_settings = st.tabs(
             ["Plan vs Actual", "My Rides", "S&C Plan", "Settings"]
         )
 
         with patient_tab_plan:
-            _render_weekly_section_from_frames(rides_df, plan_df)
+            _render_weekly_section()
 
         with patient_tab_rides:
             if rides_df.empty:
@@ -905,10 +699,16 @@ with tab2:
 
         with patient_tab_sc:
             st.subheader("S&C block overview")
-            if latest_block is None:
+            if latest_block_detail is None:
                 st.info("No S&C block created yet.")
             else:
-                block_id, start_date_s, weeks, model, deload_wk, spw, goal_s, notes_s, created_at = latest_block
+                block = latest_block_detail["block"]
+                block_id = block["block_id"]
+                start_date_s = block["start_date"]
+                weeks = block["weeks"]
+                deload_wk = block["deload_week"]
+                spw = block["sessions_per_week"]
+                goal_s = block["goal"]
                 st.caption(
                     f"Block #{block_id} | Start {start_date_s} | {weeks}w | deload week {deload_wk} | "
                     f"{spw} sessions/wk | goal={goal_s}"
@@ -926,45 +726,32 @@ with tab2:
                 st.progress(progress_ratio)
                 st.caption(f"Week {week_index} of {weeks}")
 
-                detail = db.fetch_sc_block_detail_for_user(user_id, role, block_id)
-                current_week_sessions = [row for row in detail if row[0] == week_index]
+                current_week_sessions = [
+                    row for row in latest_block_detail["sessions"] if row["week_no"] == week_index
+                ]
                 if not current_week_sessions:
                     st.info("No sessions found for the current week.")
                 else:
                     st.subheader("Current week sessions")
-                    for (wk_no, wk_start, focus, is_deload, label, day_hint, exs) in current_week_sessions:
-                        exp_label = f"Week {wk_no} ({wk_start}) - Session {label} {'(DELOAD)' if is_deload else ''}"
+                    for session in current_week_sessions:
+                        exp_label = (
+                            f"Week {session['week_no']} ({session['week_start']}) - "
+                            f"Session {session['session_label']} {'(DELOAD)' if session['is_deload'] else ''}"
+                        )
                         with st.expander(exp_label, expanded=True):
-                            if not exs:
+                            if not session["exercises"]:
                                 st.info("No exercises found for this session.")
                                 continue
 
                             ex_rows = []
-                            for ex in exs:
-                                (
-                                    _row_id,
-                                    ex_name,
-                                    sets_t,
-                                    reps_t,
-                                    pct_t,
-                                    load_t,
-                                    rpe_t,
-                                    rest_t,
-                                    intent,
-                                    n_notes,
-                                    _sets_a,
-                                    _reps_a,
-                                    _load_a,
-                                    _completed,
-                                    _a_notes,
-                                ) = ex
+                            for ex in session["exercises"]:
                                 ex_rows.append(
                                     {
-                                        "Exercise": ex_name,
-                                        "Target": f"{sets_t} x {reps_t}",
-                                        "%1RM": pct_t if pct_t is not None else "n/a",
-                                        "Load (kg)": load_t if load_t is not None else "n/a",
-                                        "Notes": n_notes or "",
+                                        "Exercise": ex["exercise_name"],
+                                        "Target": f"{ex['sets_target']} x {ex['reps_target']}",
+                                        "%1RM": ex["pct_1rm_target"] if ex["pct_1rm_target"] is not None else "n/a",
+                                        "Load (kg)": ex["load_kg_target"] if ex["load_kg_target"] is not None else "n/a",
+                                        "Notes": ex["notes"] or "",
                                     }
                                 )
                             st.dataframe(pd.DataFrame(ex_rows), use_container_width=True)
@@ -982,7 +769,7 @@ with tab3:
 
     if role == "client":
         st.info("Your coach manages the training plan. You can view it below.")
-        plan_rows = db.fetch_week_plans_for_user(user_id, role, pid)
+        plan_rows = services.list_week_plans(user_id, role, pid)
         plan_df = pd.DataFrame(plan_rows, columns=["week_start", "planned_km", "planned_hours", "phase", "notes"])
         if plan_df.empty:
             st.caption("No plan uploaded yet.")
@@ -1002,7 +789,7 @@ with tab3:
                         planned_hours_value = _to_none(row.get("planned_hours"))
                         phase_value = _to_none(row.get("phase"))
                         notes_value = _to_none(row.get("notes"))
-                        db.upsert_week_plan_for_user(
+                        services.upsert_week_plan(
                             user_id,
                             role,
                             pid,
@@ -1031,7 +818,7 @@ with tab3:
         note = st.text_area("Notes", height=80, key="manual_note")
 
         if st.button("Save this week", key="save_week_btn"):
-            db.upsert_week_plan_for_user(
+            services.upsert_week_plan(
                 user_id,
                 role,
                 pid,
@@ -1242,9 +1029,6 @@ with tab4:
 
             st.caption("Templates: define Week 1 Session A/B below. The app will auto-suggest progressions across weeks (Week 4 deload by default), but you can edit targets and record actuals.")
 
-            exercises_rows = [db.get_exercise(ex_name_map[n]) for n in ex_names]
-            ex_by_name = {r[1]: r for r in exercises_rows}
-
             def _template_editor(session_label: str):
                 st.markdown(f"### Session {session_label} template (Week 1)")
                 n_rows = st.number_input(
@@ -1274,6 +1058,7 @@ with tab4:
 
                     if ex_name != "(none)":
                         rows.append({
+                            "exercise_id": ex_name_map[ex_name],
                             "exercise_name": ex_name,
                             "sets": int(sets),
                             "reps": int(reps),
@@ -1286,10 +1071,10 @@ with tab4:
             template_B = _template_editor("B") if sessions_pw == 2 else []
 
             if st.button("Create block + auto-generate weeks/sessions"):
-                block_id = db.create_sc_block_for_user(
-                    user_id,
-                    role,
-                    pid,
+                block_id = services.create_sc_block(
+                    user_id=user_id,
+                    role=role,
+                    patient_id=pid,
                     start_date=block_start.isoformat(),
                     goal=block_goal,
                     notes=block_notes.strip() if block_notes else None,
@@ -1297,70 +1082,9 @@ with tab4:
                     model="hybrid_v1",
                     deload_week=int(deload_week),
                     sessions_per_week=int(sessions_pw),
+                    template_a=template_A,
+                    template_b=template_B,
                 )
-
-                # Create weeks + sessions + exercises with progression
-                for wk in range(1, int(block_weeks) + 1):
-                    wk_start = (block_start + timedelta(days=(wk - 1) * 7)).isoformat()
-                    is_deload = (wk == int(deload_week))
-                    focus = "deload" if is_deload else block_goal
-
-                    week_id = db.upsert_sc_week_for_user(
-                        user_id=user_id,
-                        role=role,
-                        block_id=block_id,
-                        week_no=wk,
-                        week_start=wk_start,
-                        focus=focus,
-                        deload_flag=is_deload,
-                        notes=None,
-                    )
-
-                    # Session labels
-                    labels = ["A"] if int(sessions_pw) == 1 else ["A", "B"]
-
-                    for lab in labels:
-                        sess_id = db.upsert_sc_session_for_user(
-                            user_id=user_id,
-                            role=role,
-                            week_id=week_id,
-                            session_label=lab,
-                            day_hint=None,
-                            notes=None,
-                        )
-                        db.clear_sc_session_exercises_for_user(user_id, role, sess_id)
-
-                        tpl = template_A if lab == "A" else template_B
-
-                        for row in tpl:
-                            ex_row = ex_by_name.get(row["exercise_name"])
-                            style = _parse_exercise_style(ex_row)
-
-                            sets_t, reps_t, load_t, pct_t = _suggest_progression(
-                                style=style,
-                                week_no=wk,
-                                deload=is_deload,
-                                sets_base=row["sets"],
-                                reps_base=row["reps"],
-                                load_base=row["load"],
-                                pct_base=row["pct"],
-                            )
-
-                            db.add_sc_session_exercise_for_user(
-                                user_id=user_id,
-                                role=role,
-                                session_id=sess_id,
-                                exercise_id=ex_name_map[row["exercise_name"]],
-                                sets_target=int(sets_t),
-                                reps_target=int(reps_t),
-                                pct_1rm_target=pct_t,
-                                load_kg_target=load_t,
-                                rpe_target=None,
-                                rest_sec_target=None,
-                                intent=None,
-                                notes=f"Auto-suggest ({style})",
-                            )
-
                 st.success(f"Block created (ID: {block_id}).")
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1374,34 +1098,40 @@ with tab4:
         # -----------------------------
         st.subheader("Latest block (targets + actuals)")
 
-        latest = db.fetch_latest_sc_block_for_user(user_id, role, pid)
-        if latest is None:
+        latest_detail = services.latest_sc_block_with_detail(user_id, role, pid)
+        if latest_detail is None:
             st.info("No S&C block created yet.")
             st.stop()
 
-        block_id, start_date_s, weeks, model, deload_wk, spw, goal_s, notes_s, created_at = latest
+        block = latest_detail["block"]
+        block_id = block["block_id"]
+        start_date_s = block["start_date"]
+        weeks = block["weeks"]
+        deload_wk = block["deload_week"]
+        spw = block["sessions_per_week"]
+        goal_s = block["goal"]
         st.caption(f"Block #{block_id} | Start {start_date_s} | {weeks}w | deload week {deload_wk} | {spw} sessions/wk | goal={goal_s}")
 
-        detail = db.fetch_sc_block_detail_for_user(user_id, role, block_id)
-
         # Render week by week
-        for (wk_no, wk_start, focus, is_deload, label, day_hint, exs) in detail:
+        for session in latest_detail["sessions"]:
+            label_suffix = "(DELOAD)" if session["is_deload"] else ""
             with st.expander(
-                f"Week {wk_no} ({wk_start}) - Session {label} {'(DELOAD)' if is_deload else ''}",
-                expanded=(wk_no == 1),
+                f"Week {session['week_no']} ({session['week_start']}) - Session {session['session_label']} {label_suffix}",
+                expanded=(session['week_no'] == 1),
             ):
-                if not exs:
+                if not session["exercises"]:
                     st.info("No exercises found for this session.")
                     continue
 
-                for ex in exs:
-                    (row_id, ex_name, sets_t, reps_t, pct_t, load_t, rpe_t, rest_t, intent, n_notes,
-                     sets_a, reps_a, load_a, completed, a_notes) = ex
+                for ex in session["exercises"]:
+                    row_id = ex["row_id"]
 
-                    st.markdown(f"**{ex_name}**")
+                    st.markdown(f"**{ex['exercise_name']}**")
                     st.caption(
-                        f"Target: {sets_t} x {reps_t} | %1RM={pct_t if pct_t is not None else 'n/a'} | "
-                        f"load={load_t if load_t is not None else 'n/a'} | {n_notes or ''}"
+                        f"Target: {ex['sets_target']} x {ex['reps_target']} | "
+                        f"%1RM={ex['pct_1rm_target'] if ex['pct_1rm_target'] is not None else 'n/a'} | "
+                        f"load={ex['load_kg_target'] if ex['load_kg_target'] is not None else 'n/a'} | "
+                        f"{ex['notes'] or ''}"
                     )
 
                     c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
@@ -1409,37 +1139,41 @@ with tab4:
                         sets_actual = st.number_input(
                             "Actual sets",
                             min_value=0,
-                            value=int(sets_a) if sets_a is not None else 0,
+                            value=int(ex["sets_actual"]) if ex["sets_actual"] is not None else 0,
                             key=f"a_sets_{row_id}",
                         )
                     with c2:
                         reps_actual = st.number_input(
                             "Actual reps/time",
                             min_value=0,
-                            value=int(reps_a) if reps_a is not None else 0,
+                            value=int(ex["reps_actual"]) if ex["reps_actual"] is not None else 0,
                             key=f"a_reps_{row_id}",
                         )
                     with c3:
                         load_actual = st.number_input(
                             "Actual load (kg)",
                             min_value=0.0,
-                            value=float(load_a) if load_a is not None else 0.0,
+                            value=float(ex["load_kg_actual"]) if ex["load_kg_actual"] is not None else 0.0,
                             step=2.5,
                             key=f"a_load_{row_id}",
                         )
                     with c4:
-                        done = st.checkbox("Completed", value=bool(completed), key=f"a_done_{row_id}")
-                        note_actual = st.text_input("Actual notes", value=a_notes or "", key=f"a_note_{row_id}")
+                        done = st.checkbox("Completed", value=bool(ex["completed"]), key=f"a_done_{row_id}")
+                        note_actual = st.text_input(
+                            "Actual notes",
+                            value=ex["actual_notes"] or "",
+                            key=f"a_note_{row_id}",
+                        )
 
                     if st.button("Save actual", key=f"save_actual_{row_id}"):
-                        db.update_sc_session_exercise_actual_for_user(
+                        services.update_sc_actuals(
                             user_id=user_id,
                             role=role,
                             row_id=row_id,
                             sets_actual=int(sets_actual) if sets_actual > 0 else None,
                             reps_actual=int(reps_actual) if reps_actual > 0 else None,
                             load_kg_actual=float(load_actual) if load_actual > 0 else None,
-                            completed_flag=bool(done),
+                            completed=bool(done),
                             actual_notes=note_actual.strip() if note_actual else None,
                         )
                         st.success("Saved.")
