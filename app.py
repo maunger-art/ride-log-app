@@ -195,7 +195,8 @@ def _restore_auth_session(client: Client) -> Optional[dict]:
     try:
         response = client.auth.refresh_session(refresh_token)
         return _store_auth_state(response)
-    except Exception:
+    except Exception as exc:
+        st.warning(f"Session refresh failed: {exc}")
         st.session_state.pop("auth_session", None)
         st.session_state.pop("auth_user", None)
         return None
@@ -240,6 +241,10 @@ def require_authenticated_user() -> dict:
             st.rerun()
         except Exception as exc:
             st.error(f"Email sign in failed: {exc}")
+
+    restored_user = _restore_auth_session(client)
+    if restored_user:
+        return restored_user
 
     st.title("Sign in")
     st.caption("Coaches sign in with email and password. Clients receive a login email.")
