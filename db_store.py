@@ -49,6 +49,47 @@ def _ensure_column(cur: sqlite3.Cursor, table: str, col: str, ddl: str) -> None:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
+def _patients_unique_on_name_exists(cur: sqlite3.Cursor) -> bool:
+    try:
+        cur.execute("PRAGMA index_list(patients)")
+    except sqlite3.OperationalError:
+        return False
+    for row in cur.fetchall():
+        index_name = row[1]
+        is_unique = row[2]
+        if not is_unique:
+            continue
+        cur.execute(f"PRAGMA index_info({index_name})")
+        cols = [row[2] for row in cur.fetchall()]
+        if cols == ["name"]:
+            return True
+    return False
+
+
+def _rebuild_patients_table(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("PRAGMA foreign_keys=OFF")
+    cur.execute("ALTER TABLE patients RENAME TO patients_old")
+    cur.execute("""
+        CREATE TABLE patients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            owner_user_id TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    old_cols = _table_columns(cur, "patients_old")
+    owner_select = "owner_user_id" if "owner_user_id" in old_cols else "NULL AS owner_user_id"
+    created_select = "created_at" if "created_at" in old_cols else "datetime('now') AS created_at"
+    cur.execute(f"""
+        INSERT INTO patients(id, name, owner_user_id, created_at)
+        SELECT id, name, {owner_select}, {created_select}
+        FROM patients_old
+    """)
+    cur.execute("DROP TABLE patients_old")
+    cur.execute("PRAGMA foreign_keys=ON")
+
+
 # -----------------------------
 # Init / migrations
 # -----------------------------
@@ -62,13 +103,23 @@ def init_db() -> None:
     cur.execute("""
     CREATE TABLE IF NOT EXISTS patients (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
         owner_user_id TEXT,
         created_at TEXT DEFAULT (datetime('now'))
     )
     """)
 
+    if _patients_unique_on_name_exists(cur):
+        _rebuild_patients_table(conn)
+        cur = conn.cursor()
+
     _ensure_column(cur, "patients", "owner_user_id", "owner_user_id TEXT")
+
+    cur.execute("""
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_patients_owner_name_unique
+    ON patients(owner_user_id, name)
+    WHERE owner_user_id IS NOT NULL
+    """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS user_roles (
@@ -357,15 +408,26 @@ def init_db() -> None:
 def upsert_patient(name: str, owner_user_id: Optional[str] = None) -> int:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO patients(name, owner_user_id) VALUES (?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            name=excluded.name,
-            owner_user_id=COALESCE(excluded.owner_user_id, patients.owner_user_id)
-    """, (name, owner_user_id))
+    if owner_user_id is not None:
+        cur.execute(
+            "SELECT id FROM patients WHERE name = ? AND owner_user_id = ?",
+            (name, owner_user_id),
+        )
+    else:
+        cur.execute(
+            "SELECT id FROM patients WHERE name = ? AND owner_user_id IS NULL",
+            (name,),
+        )
+    row = cur.fetchone()
+    if row is None:
+        cur.execute(
+            "INSERT INTO patients(name, owner_user_id) VALUES (?, ?)",
+            (name, owner_user_id),
+        )
+        pid = int(cur.lastrowid)
+    else:
+        pid = int(row[0])
     conn.commit()
-    cur.execute("SELECT id FROM patients WHERE name = ?", (name,))
-    pid = int(cur.fetchone()[0])
     conn.close()
     return pid
 
