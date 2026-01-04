@@ -1,14 +1,19 @@
 import streamlit as st
+import os
+from supabase import create_client
 
+# -------------------------------------------------
+# Streamlit app config (MUST be first Streamlit call)
+# -------------------------------------------------
 st.set_page_config(
     page_title="Technique | Performance & Rehab",
     page_icon="assets/technique_favicon.png",
     layout="wide",
 )
 
-# -----------------------------
-# Supabase init (GLOBAL)
-# -----------------------------
+# -------------------------------------------------
+# Supabase configuration (ENV)
+# -------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 
@@ -16,22 +21,30 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Supabase environment variables are not set.")
     st.stop()
 
-supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+# -------------------------------------------------
+# Supabase client (cached – ONE per session)
+# -------------------------------------------------
+@st.cache_resource
+def get_supabase():
+    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-st.sidebar.image("assets/technique_logo_full.png", use_column_width=True)
+supabase = get_supabase()
 
+# -------------------------------------------------
+# OPTIONAL sanity check during setup
+# -------------------------------------------------
+# st.sidebar.success("Supabase connected")
+
+# -------------------------------------------------
+# The rest of your imports
+# -------------------------------------------------
 import pandas as pd
 import time
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from supabase import Client, create_client
-
-from config import SUPABASE_URL, SUPABASE_KEY
 from plan import parse_plan_csv, rides_to_weekly_summary, to_monday
 from strava import build_auth_url, exchange_code_for_token, ensure_fresh_token, list_activities
-
-# Robust db import: prevents silent deploy failures
 import db_store as db
 
 # Optional: seed strength DB via sidebar button
