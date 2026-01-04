@@ -489,11 +489,8 @@ def list_patients() -> List[Tuple[int, str]]:
 def get_user_role(user_id: str) -> Optional[str]:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
+    cur.execute("SELECT role FROM user_roles WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
-    if row is None:
-        cur.execute("SELECT role FROM user_roles WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
     conn.close()
     return None if row is None else str(row[0])
 
@@ -501,12 +498,6 @@ def get_user_role(user_id: str) -> Optional[str]:
 def upsert_user_role(user_id: str, role: str) -> None:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO users(user_id, role)
-        VALUES (?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            role=excluded.role
-    """, (user_id, role))
     cur.execute("""
         INSERT INTO user_roles(user_id, role)
         VALUES (?, ?)
