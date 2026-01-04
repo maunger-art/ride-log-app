@@ -452,8 +452,18 @@ def upsert_patient(name: str, owner_user_id: Optional[str] = None) -> int:
             (name, owner_user_id),
         )
         pid = int(cur.lastrowid)
+        if owner_user_id is not None:
+            cur.execute("""
+                INSERT OR IGNORE INTO patient_access(user_id, patient_id, access_level)
+                VALUES (?, ?, 'client')
+            """, (owner_user_id, pid))
     else:
         pid = int(row[0])
+        if owner_user_id is not None:
+            cur.execute("""
+                INSERT OR IGNORE INTO patient_access(user_id, patient_id, access_level)
+                VALUES (?, ?, 'client')
+            """, (owner_user_id, pid))
     conn.commit()
     conn.close()
     return pid
@@ -471,8 +481,11 @@ def list_patients() -> List[Tuple[int, str]]:
 def get_user_role(user_id: str) -> Optional[str]:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT role FROM user_roles WHERE user_id = ?", (user_id,))
+    cur.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
+    if row is None:
+        cur.execute("SELECT role FROM user_roles WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
     conn.close()
     return None if row is None else str(row[0])
 
@@ -480,6 +493,12 @@ def get_user_role(user_id: str) -> Optional[str]:
 def upsert_user_role(user_id: str, role: str) -> None:
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO users(user_id, role)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            role=excluded.role
+    """, (user_id, role))
     cur.execute("""
         INSERT INTO user_roles(user_id, role)
         VALUES (?, ?)
@@ -557,6 +576,10 @@ def assign_patient_to_coach(coach_user_id: str, patient_id: int) -> None:
     cur.execute("""
         INSERT OR IGNORE INTO coach_patient_access(coach_user_id, patient_id)
         VALUES (?, ?)
+    """, (coach_user_id, int(patient_id)))
+    cur.execute("""
+        INSERT OR IGNORE INTO patient_access(user_id, patient_id, access_level)
+        VALUES (?, ?, 'coach')
     """, (coach_user_id, int(patient_id)))
     conn.commit()
     conn.close()
@@ -637,7 +660,7 @@ def claim_client_invite(email: str, user_id: str) -> Optional[int]:
 def list_patients_for_user(user_id: str, role: str) -> List[Tuple[int, str]]:
     conn = get_conn()
     cur = conn.cursor()
-    if role == "coach":
+    if role in {"coach", "client"}:
         cur.execute("""
             SELECT DISTINCT p.id, p.name
             FROM patients p
