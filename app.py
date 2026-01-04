@@ -390,8 +390,11 @@ with tab2:
     token_row = db.get_strava_tokens_for_user(user_id, role, pid)
 
     if token_row is None:
-        st.link_button("Connect Strava", build_auth_url(state=str(pid)))
-        st.caption("Connect Strava to automatically import rides into the log.")
+        try:
+            st.link_button("Connect Strava", build_auth_url(state=str(pid)))
+            st.caption("Connect Strava to automatically import rides into the log.")
+        except Exception as exc:
+            st.error(str(exc))
     else:
         access_token, refresh_token, expires_at, athlete_id, scope, refreshed = ensure_fresh_token(token_row)
         if refreshed:

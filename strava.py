@@ -9,7 +9,19 @@ AUTH_URL = "https://www.strava.com/oauth/authorize"
 TOKEN_URL = "https://www.strava.com/api/v3/oauth/token"
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 
+def _require_strava_config() -> None:
+    missing = []
+    if not STRAVA_CLIENT_ID:
+        missing.append("STRAVA_CLIENT_ID")
+    if not STRAVA_CLIENT_SECRET:
+        missing.append("STRAVA_CLIENT_SECRET")
+    if not STRAVA_REDIRECT_URI:
+        missing.append("STRAVA_REDIRECT_URI")
+    if missing:
+        raise ValueError(f"Missing Strava configuration: {', '.join(missing)}")
+
 def build_auth_url(state: str, scope: str = "activity:read_all") -> str:
+    _require_strava_config()
     params = {
         "client_id": STRAVA_CLIENT_ID,
         "redirect_uri": STRAVA_REDIRECT_URI,
@@ -21,6 +33,7 @@ def build_auth_url(state: str, scope: str = "activity:read_all") -> str:
     return f"{AUTH_URL}?{urlencode(params)}"
 
 def exchange_code_for_token(code: str) -> dict:
+    _require_strava_config()
     r = requests.post(TOKEN_URL, data={
         "client_id": STRAVA_CLIENT_ID,
         "client_secret": STRAVA_CLIENT_SECRET,
@@ -31,6 +44,7 @@ def exchange_code_for_token(code: str) -> dict:
     return r.json()
 
 def refresh_access_token(refresh_token: str) -> dict:
+    _require_strava_config()
     r = requests.post(TOKEN_URL, data={
         "client_id": STRAVA_CLIENT_ID,
         "client_secret": STRAVA_CLIENT_SECRET,
