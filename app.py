@@ -68,6 +68,17 @@ st.markdown(
         font-size: 1.25rem;
         margin-top: 1.25rem;
     }}
+
+    .card {{
+        background: var(--secondary-background-color, #ffffff);
+        border: 1px solid rgba(15, 23, 42, 0.12);
+        border-radius: 0.85rem;
+        padding: 1.5rem;
+    }}
+
+    .card + .card {{
+        margin-top: 1.5rem;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -1201,226 +1212,268 @@ with tab4:
 
     st.divider()
 
-    # -----------------------------
-    # Rep range tool (restored)
-    # -----------------------------
-    st.subheader("Rep schemes (endurance / hypertrophy / strength / power)")
+    with st.container():
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        # -----------------------------
+        # Rep range tool (restored)
+        # -----------------------------
+        st.subheader("Rep schemes (endurance / hypertrophy / strength / power)")
 
-    goal = st.selectbox("Goal", options=["endurance", "hypertrophy", "strength", "power"], index=0)
-    schemes = db.list_rep_schemes(goal)
-    if not schemes:
-        st.warning("No rep schemes found for this goal. Seed rep schemes first.")
-    else:
-        s = schemes[0]
-        _, s_goal, s_phase, reps_min, reps_max, sets_min, sets_max, pct_min, pct_max, rpe_min, rpe_max, rest_min, rest_max, intent = s
-        st.write(f"**Scheme:** {s_goal} ({s_phase or 'default'})")
-        st.write(f"- Sets: {sets_min}–{sets_max}")
-        st.write(f"- Reps: {reps_min}–{reps_max}")
-        if pct_min is not None and pct_max is not None:
-            st.write(f"- %1RM: {int(pct_min*100)}–{int(pct_max*100)}%")
+        goal = st.selectbox("Goal", options=["endurance", "hypertrophy", "strength", "power"], index=0)
+        schemes = db.list_rep_schemes(goal)
+        if not schemes:
+            st.warning("No rep schemes found for this goal. Seed rep schemes first.")
         else:
-            st.write("- %1RM: n/a")
-        if rest_min and rest_max:
-            st.write(f"- Rest: {rest_min}–{rest_max} sec")
-        if rpe_min and rpe_max:
-            st.write(f"- RPE: {rpe_min}–{rpe_max}")
-        if intent:
-            st.write(f"- Intent: {intent}")
+            s = schemes[0]
+            _, s_goal, s_phase, reps_min, reps_max, sets_min, sets_max, pct_min, pct_max, rpe_min, rpe_max, rest_min, rest_max, intent = s
+            st.write(f"**Scheme:** {s_goal} ({s_phase or 'default'})")
+            st.write(f"- Sets: {sets_min}–{sets_max}")
+            st.write(f"- Reps: {reps_min}–{reps_max}")
+            if pct_min is not None and pct_max is not None:
+                st.write(f"- %1RM: {int(pct_min*100)}–{int(pct_max*100)}%")
+            else:
+                st.write("- %1RM: n/a")
+            if rest_min and rest_max:
+                st.write(f"- Rest: {rest_min}–{rest_max} sec")
+            if rpe_min and rpe_max:
+                st.write(f"- RPE: {rpe_min}–{rpe_max}")
+            if intent:
+                st.write(f"- Intent: {intent}")
 
-        if metric == "rel_1rm_bw" and est.get("estimated_1rm_kg") and pct_min is not None and pct_max is not None:
-            w_min = float(est["estimated_1rm_kg"]) * float(pct_min)
-            w_max = float(est["estimated_1rm_kg"]) * float(pct_max)
-            st.info(f"Working load range (based on estimate): {w_min:.1f}–{w_max:.1f} kg")
+            if metric == "rel_1rm_bw" and est.get("estimated_1rm_kg") and pct_min is not None and pct_max is not None:
+                w_min = float(est["estimated_1rm_kg"]) * float(pct_min)
+                w_max = float(est["estimated_1rm_kg"]) * float(pct_max)
+                st.info(f"Working load range (based on estimate): {w_min:.1f}–{w_max:.1f} kg")
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
 
-    # -----------------------------
-    # 6-week block builder (4/6/8 selectable)
-    # -----------------------------
-    st.subheader("Create a block (4 / 6 / 8 weeks, hybrid progression, editable)")
+    with st.container():
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        # -----------------------------
+        # 6-week block builder (4/6/8 selectable)
+        # -----------------------------
+        st.subheader("Create a block (4 / 6 / 8 weeks, hybrid progression, editable)")
 
-    if role == "client":
-        st.info("Your coach manages S&C blocks. You can log actuals below.")
-    else:
-        colb1, colb2, colb3, colb4 = st.columns(4)
-        with colb1:
-            block_start = st.date_input("Block start date (Mon recommended)", value=to_monday(date.today()))
-        with colb2:
-            block_weeks = st.selectbox("Block length (weeks)", options=[4, 6, 8], index=1)
-        with colb3:
-            sessions_pw = st.selectbox("Sessions per week", options=[1, 2], index=1)
-        with colb4:
-            deload_week = st.number_input("Deload week #", min_value=1, max_value=int(block_weeks), value=min(4, int(block_weeks)))
+        if role == "client":
+            st.info("Your coach manages S&C blocks. You can log actuals below.")
+        else:
+            colb1, colb2, colb3, colb4 = st.columns(4)
+            with colb1:
+                block_start = st.date_input("Block start date (Mon recommended)", value=to_monday(date.today()))
+            with colb2:
+                block_weeks = st.selectbox("Block length (weeks)", options=[4, 6, 8], index=1)
+            with colb3:
+                sessions_pw = st.selectbox("Sessions per week", options=[1, 2], index=1)
+            with colb4:
+                deload_week = st.number_input("Deload week #", min_value=1, max_value=int(block_weeks), value=min(4, int(block_weeks)))
 
-        block_goal = st.selectbox("Block goal label", options=["hybrid", "endurance", "hypertrophy", "strength", "power"], index=0)
-        block_notes = st.text_area("Block notes (optional)", height=80)
+            block_goal = st.selectbox("Block goal label", options=["hybrid", "endurance", "hypertrophy", "strength", "power"], index=0)
+            block_notes = st.text_area("Block notes (optional)", height=80)
 
-        st.caption("Templates: define Week 1 Session A/B below. The app will auto-suggest progressions across weeks (Week 4 deload by default), but you can edit targets and record actuals.")
+            st.caption("Templates: define Week 1 Session A/B below. The app will auto-suggest progressions across weeks (Week 4 deload by default), but you can edit targets and record actuals.")
 
-        exercises_rows = [db.get_exercise(ex_name_map[n]) for n in ex_names]
-        ex_by_name = {r[1]: r for r in exercises_rows}
+            exercises_rows = [db.get_exercise(ex_name_map[n]) for n in ex_names]
+            ex_by_name = {r[1]: r for r in exercises_rows}
 
-        def _template_editor(session_label: str):
-            st.markdown(f"### Session {session_label} template (Week 1)")
-            n_rows = st.number_input(f"How many exercises in Session {session_label}?", min_value=1, max_value=12, value=6, key=f"n_{session_label}")
-            rows = []
-            for i in range(int(n_rows)):
-                c1, c2, c3, c4, c5 = st.columns([3, 1, 1, 1, 2])
-                with c1:
-                    ex_name = st.selectbox(f"Exercise {i+1}", options=["(none)"] + ex_names, key=f"{session_label}_ex_{i}")
-                with c2:
-                    sets = st.number_input("Sets", min_value=1, max_value=10, value=3, key=f"{session_label}_sets_{i}")
-                with c3:
-                    reps = st.number_input("Reps/Time", min_value=1, max_value=999, value=10, key=f"{session_label}_reps_{i}")
-                with c4:
-                    pct = st.number_input("%1RM", min_value=0.0, max_value=1.0, value=0.70, step=0.05, key=f"{session_label}_pct_{i}")
-                with c5:
-                    load = st.number_input("Load kg (optional)", min_value=0.0, value=0.0, step=2.5, key=f"{session_label}_load_{i}")
+            def _template_editor(session_label: str):
+                st.markdown(f"### Session {session_label} template (Week 1)")
+                n_rows = st.number_input(
+                    f"How many exercises in Session {session_label}?",
+                    min_value=1,
+                    max_value=12,
+                    value=6,
+                    key=f"n_{session_label}",
+                )
+                rows = []
+                for i in range(int(n_rows)):
+                    c1, c2, c3, c4, c5 = st.columns([3, 1, 1, 1, 2])
+                    with c1:
+                        ex_name = st.selectbox(
+                            f"Exercise {i+1}",
+                            options=["(none)"] + ex_names,
+                            key=f"{session_label}_ex_{i}",
+                        )
+                    with c2:
+                        sets = st.number_input("Sets", min_value=1, max_value=10, value=3, key=f"{session_label}_sets_{i}")
+                    with c3:
+                        reps = st.number_input("Reps/Time", min_value=1, max_value=999, value=10, key=f"{session_label}_reps_{i}")
+                    with c4:
+                        pct = st.number_input("%1RM", min_value=0.0, max_value=1.0, value=0.70, step=0.05, key=f"{session_label}_pct_{i}")
+                    with c5:
+                        load = st.number_input("Load kg (optional)", min_value=0.0, value=0.0, step=2.5, key=f"{session_label}_load_{i}")
 
-                if ex_name != "(none)":
-                    rows.append({
-                        "exercise_name": ex_name,
-                        "sets": int(sets),
-                        "reps": int(reps),
-                        "pct": float(pct) if pct > 0 else None,
-                        "load": float(load) if load and load > 0 else None,
-                    })
-            return rows
+                    if ex_name != "(none)":
+                        rows.append({
+                            "exercise_name": ex_name,
+                            "sets": int(sets),
+                            "reps": int(reps),
+                            "pct": float(pct) if pct > 0 else None,
+                            "load": float(load) if load and load > 0 else None,
+                        })
+                return rows
 
-        template_A = _template_editor("A")
-        template_B = _template_editor("B") if sessions_pw == 2 else []
+            template_A = _template_editor("A")
+            template_B = _template_editor("B") if sessions_pw == 2 else []
 
-        if st.button("Create block + auto-generate weeks/sessions"):
-            block_id = db.create_sc_block_for_user(
-                user_id,
-                role,
-                pid,
-                start_date=block_start.isoformat(),
-                goal=block_goal,
-                notes=block_notes.strip() if block_notes else None,
-                weeks=int(block_weeks),
-                model="hybrid_v1",
-                deload_week=int(deload_week),
-                sessions_per_week=int(sessions_pw),
-            )
-
-            # Create weeks + sessions + exercises with progression
-            for wk in range(1, int(block_weeks) + 1):
-                wk_start = (block_start + timedelta(days=(wk - 1) * 7)).isoformat()
-                is_deload = (wk == int(deload_week))
-                focus = "deload" if is_deload else block_goal
-
-                week_id = db.upsert_sc_week_for_user(
-                    user_id=user_id,
-                    role=role,
-                    block_id=block_id,
-                    week_no=wk,
-                    week_start=wk_start,
-                    focus=focus,
-                    deload_flag=is_deload,
-                    notes=None,
+            if st.button("Create block + auto-generate weeks/sessions"):
+                block_id = db.create_sc_block_for_user(
+                    user_id,
+                    role,
+                    pid,
+                    start_date=block_start.isoformat(),
+                    goal=block_goal,
+                    notes=block_notes.strip() if block_notes else None,
+                    weeks=int(block_weeks),
+                    model="hybrid_v1",
+                    deload_week=int(deload_week),
+                    sessions_per_week=int(sessions_pw),
                 )
 
-                # Session labels
-                labels = ["A"] if int(sessions_pw) == 1 else ["A", "B"]
+                # Create weeks + sessions + exercises with progression
+                for wk in range(1, int(block_weeks) + 1):
+                    wk_start = (block_start + timedelta(days=(wk - 1) * 7)).isoformat()
+                    is_deload = (wk == int(deload_week))
+                    focus = "deload" if is_deload else block_goal
 
-                for lab in labels:
-                    sess_id = db.upsert_sc_session_for_user(
+                    week_id = db.upsert_sc_week_for_user(
                         user_id=user_id,
                         role=role,
-                        week_id=week_id,
-                        session_label=lab,
-                        day_hint=None,
+                        block_id=block_id,
+                        week_no=wk,
+                        week_start=wk_start,
+                        focus=focus,
+                        deload_flag=is_deload,
                         notes=None,
                     )
-                    db.clear_sc_session_exercises_for_user(user_id, role, sess_id)
 
-                    tpl = template_A if lab == "A" else template_B
+                    # Session labels
+                    labels = ["A"] if int(sessions_pw) == 1 else ["A", "B"]
 
-                    for row in tpl:
-                        ex_row = ex_by_name.get(row["exercise_name"])
-                        style = _parse_exercise_style(ex_row)
-
-                        sets_t, reps_t, load_t, pct_t = _suggest_progression(
-                            style=style,
-                            week_no=wk,
-                            deload=is_deload,
-                            sets_base=row["sets"],
-                            reps_base=row["reps"],
-                            load_base=row["load"],
-                            pct_base=row["pct"],
-                        )
-
-                        db.add_sc_session_exercise_for_user(
+                    for lab in labels:
+                        sess_id = db.upsert_sc_session_for_user(
                             user_id=user_id,
                             role=role,
-                            session_id=sess_id,
-                            exercise_id=ex_name_map[row["exercise_name"]],
-                            sets_target=int(sets_t),
-                            reps_target=int(reps_t),
-                            pct_1rm_target=pct_t,
-                            load_kg_target=load_t,
-                            rpe_target=None,
-                            rest_sec_target=None,
-                            intent=None,
-                            notes=f"Auto-suggest ({style})",
+                            week_id=week_id,
+                            session_label=lab,
+                            day_hint=None,
+                            notes=None,
                         )
+                        db.clear_sc_session_exercises_for_user(user_id, role, sess_id)
 
-            st.success(f"Block created (ID: {block_id}).")
-            st.rerun()
+                        tpl = template_A if lab == "A" else template_B
+
+                        for row in tpl:
+                            ex_row = ex_by_name.get(row["exercise_name"])
+                            style = _parse_exercise_style(ex_row)
+
+                            sets_t, reps_t, load_t, pct_t = _suggest_progression(
+                                style=style,
+                                week_no=wk,
+                                deload=is_deload,
+                                sets_base=row["sets"],
+                                reps_base=row["reps"],
+                                load_base=row["load"],
+                                pct_base=row["pct"],
+                            )
+
+                            db.add_sc_session_exercise_for_user(
+                                user_id=user_id,
+                                role=role,
+                                session_id=sess_id,
+                                exercise_id=ex_name_map[row["exercise_name"]],
+                                sets_target=int(sets_t),
+                                reps_target=int(reps_t),
+                                pct_1rm_target=pct_t,
+                                load_kg_target=load_t,
+                                rpe_target=None,
+                                rest_sec_target=None,
+                                intent=None,
+                                notes=f"Auto-suggest ({style})",
+                            )
+
+                st.success(f"Block created (ID: {block_id}).")
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
 
-    # -----------------------------
-    # View latest block + edit actuals
-    # -----------------------------
-    st.subheader("Latest block (targets + actuals)")
+    with st.container():
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        # -----------------------------
+        # View latest block + edit actuals
+        # -----------------------------
+        st.subheader("Latest block (targets + actuals)")
 
-    latest = db.fetch_latest_sc_block_for_user(user_id, role, pid)
-    if latest is None:
-        st.info("No S&C block created yet.")
-        st.stop()
+        latest = db.fetch_latest_sc_block_for_user(user_id, role, pid)
+        if latest is None:
+            st.info("No S&C block created yet.")
+            st.stop()
 
-    block_id, start_date_s, weeks, model, deload_wk, spw, goal_s, notes_s, created_at = latest
-    st.caption(f"Block #{block_id} | Start {start_date_s} | {weeks}w | deload week {deload_wk} | {spw} sessions/wk | goal={goal_s}")
+        block_id, start_date_s, weeks, model, deload_wk, spw, goal_s, notes_s, created_at = latest
+        st.caption(f"Block #{block_id} | Start {start_date_s} | {weeks}w | deload week {deload_wk} | {spw} sessions/wk | goal={goal_s}")
 
-    detail = db.fetch_sc_block_detail_for_user(user_id, role, block_id)
+        detail = db.fetch_sc_block_detail_for_user(user_id, role, block_id)
 
-    # Render week by week
-    for (wk_no, wk_start, focus, is_deload, label, day_hint, exs) in detail:
-        with st.expander(f"Week {wk_no} ({wk_start}) - Session {label} {'(DELOAD)' if is_deload else ''}", expanded=(wk_no == 1)):
-            if not exs:
-                st.info("No exercises found for this session.")
-                continue
+        # Render week by week
+        for (wk_no, wk_start, focus, is_deload, label, day_hint, exs) in detail:
+            with st.expander(
+                f"Week {wk_no} ({wk_start}) - Session {label} {'(DELOAD)' if is_deload else ''}",
+                expanded=(wk_no == 1),
+            ):
+                if not exs:
+                    st.info("No exercises found for this session.")
+                    continue
 
-            for ex in exs:
-                (row_id, ex_name, sets_t, reps_t, pct_t, load_t, rpe_t, rest_t, intent, n_notes,
-                 sets_a, reps_a, load_a, completed, a_notes) = ex
+                for ex in exs:
+                    (row_id, ex_name, sets_t, reps_t, pct_t, load_t, rpe_t, rest_t, intent, n_notes,
+                     sets_a, reps_a, load_a, completed, a_notes) = ex
 
-                st.markdown(f"**{ex_name}**")
-                st.caption(f"Target: {sets_t} x {reps_t} | %1RM={pct_t if pct_t is not None else 'n/a'} | load={load_t if load_t is not None else 'n/a'} | {n_notes or ''}")
-
-                c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-                with c1:
-                    sets_actual = st.number_input("Actual sets", min_value=0, value=int(sets_a) if sets_a is not None else 0, key=f"a_sets_{row_id}")
-                with c2:
-                    reps_actual = st.number_input("Actual reps/time", min_value=0, value=int(reps_a) if reps_a is not None else 0, key=f"a_reps_{row_id}")
-                with c3:
-                    load_actual = st.number_input("Actual load (kg)", min_value=0.0, value=float(load_a) if load_a is not None else 0.0, step=2.5, key=f"a_load_{row_id}")
-                with c4:
-                    done = st.checkbox("Completed", value=bool(completed), key=f"a_done_{row_id}")
-                    note_actual = st.text_input("Actual notes", value=a_notes or "", key=f"a_note_{row_id}")
-
-                if st.button("Save actual", key=f"save_actual_{row_id}"):
-                    db.update_sc_session_exercise_actual_for_user(
-                        user_id=user_id,
-                        role=role,
-                        row_id=row_id,
-                        sets_actual=int(sets_actual) if sets_actual > 0 else None,
-                        reps_actual=int(reps_actual) if reps_actual > 0 else None,
-                        load_kg_actual=float(load_actual) if load_actual > 0 else None,
-                        completed_flag=bool(done),
-                        actual_notes=note_actual.strip() if note_actual else None,
+                    st.markdown(f"**{ex_name}**")
+                    st.caption(
+                        f"Target: {sets_t} x {reps_t} | %1RM={pct_t if pct_t is not None else 'n/a'} | "
+                        f"load={load_t if load_t is not None else 'n/a'} | {n_notes or ''}"
                     )
-                    st.success("Saved.")
-                    st.rerun()
+
+                    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+                    with c1:
+                        sets_actual = st.number_input(
+                            "Actual sets",
+                            min_value=0,
+                            value=int(sets_a) if sets_a is not None else 0,
+                            key=f"a_sets_{row_id}",
+                        )
+                    with c2:
+                        reps_actual = st.number_input(
+                            "Actual reps/time",
+                            min_value=0,
+                            value=int(reps_a) if reps_a is not None else 0,
+                            key=f"a_reps_{row_id}",
+                        )
+                    with c3:
+                        load_actual = st.number_input(
+                            "Actual load (kg)",
+                            min_value=0.0,
+                            value=float(load_a) if load_a is not None else 0.0,
+                            step=2.5,
+                            key=f"a_load_{row_id}",
+                        )
+                    with c4:
+                        done = st.checkbox("Completed", value=bool(completed), key=f"a_done_{row_id}")
+                        note_actual = st.text_input("Actual notes", value=a_notes or "", key=f"a_note_{row_id}")
+
+                    if st.button("Save actual", key=f"save_actual_{row_id}"):
+                        db.update_sc_session_exercise_actual_for_user(
+                            user_id=user_id,
+                            role=role,
+                            row_id=row_id,
+                            sets_actual=int(sets_actual) if sets_actual > 0 else None,
+                            reps_actual=int(reps_actual) if reps_actual > 0 else None,
+                            load_kg_actual=float(load_actual) if load_actual > 0 else None,
+                            completed_flag=bool(done),
+                            actual_notes=note_actual.strip() if note_actual else None,
+                        )
+                        st.success("Saved.")
+                        st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
