@@ -826,6 +826,7 @@ with tab2:
         st.divider()
         st.subheader("Upload plan (preview)")
         st.caption("Preview plan CSVs here. Save changes from the Plan Import / Edit tab.")
+        st.info("Go to the **Plan Import / Edit** tab to upload or edit the full plan.")
         uploaded_preview = st.file_uploader("Upload plan CSV", type=["csv"], key="plan_csv_preview")
         if uploaded_preview is not None:
             try:
@@ -839,50 +840,17 @@ with tab2:
         st.subheader("S&C blocks")
         if latest_block is None:
             st.info("No S&C block created yet.")
+            st.caption("Go to the **S&C Planning** tab to create the first block.")
         else:
             block_id, start_date_s, weeks, model, deload_wk, spw, goal_s, notes_s, created_at = latest_block
             st.caption(
                 f"Block #{block_id} | Start {start_date_s} | {weeks}w | deload week {deload_wk} | "
                 f"{spw} sessions/wk | goal={goal_s}"
             )
-
-            detail = db.fetch_sc_block_detail_for_user(user_id, role, block_id)
-            for (wk_no, wk_start, focus, is_deload, label, day_hint, exs) in detail:
-                exp_label = f"Week {wk_no} ({wk_start}) - Session {label} {'(DELOAD)' if is_deload else ''}"
-                with st.expander(exp_label, expanded=(wk_no == 1)):
-                    if not exs:
-                        st.info("No exercises found for this session.")
-                        continue
-
-                    ex_rows = []
-                    for ex in exs:
-                        (
-                            _row_id,
-                            ex_name,
-                            sets_t,
-                            reps_t,
-                            pct_t,
-                            load_t,
-                            rpe_t,
-                            rest_t,
-                            intent,
-                            n_notes,
-                            _sets_a,
-                            _reps_a,
-                            _load_a,
-                            _completed,
-                            _a_notes,
-                        ) = ex
-                        ex_rows.append(
-                            {
-                                "Exercise": ex_name,
-                                "Target": f"{sets_t} x {reps_t}",
-                                "%1RM": pct_t if pct_t is not None else "n/a",
-                                "Load (kg)": load_t if load_t is not None else "n/a",
-                                "Notes": n_notes or "",
-                            }
-                        )
-                    st.dataframe(pd.DataFrame(ex_rows), use_container_width=True)
+            st.caption("Summary only here. Use the **S&C Planning** tab to edit or create blocks.")
+            st.write(
+                f"Total sessions: {int(weeks) * int(spw)} | Model: {model} | Notes: {notes_s or 'n/a'}"
+            )
 
         st.divider()
         _render_strava_section()
