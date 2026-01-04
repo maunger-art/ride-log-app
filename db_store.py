@@ -139,6 +139,14 @@ def init_db() -> None:
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS organization_domains (
+        email_suffix TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS coach_patient_access (
         coach_user_id TEXT NOT NULL,
         patient_id INTEGER NOT NULL,
@@ -489,6 +497,31 @@ def add_coach_to_org(owner_user_id: str, coach_user_id: str) -> None:
         INSERT OR IGNORE INTO organization_coaches(owner_user_id, coach_user_id)
         VALUES (?, ?)
     """, (owner_user_id, coach_user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_owner_for_email_suffix(email_suffix: str) -> Optional[str]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT owner_user_id
+        FROM organization_domains
+        WHERE email_suffix = ?
+        LIMIT 1
+    """, (email_suffix.lower(),))
+    row = cur.fetchone()
+    conn.close()
+    return None if row is None else str(row[0])
+
+
+def register_owner_email_suffix(owner_user_id: str, email_suffix: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO organization_domains(email_suffix, owner_user_id)
+        VALUES (?, ?)
+    """, (email_suffix.lower(), owner_user_id))
     conn.commit()
     conn.close()
 

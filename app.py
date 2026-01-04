@@ -201,10 +201,19 @@ def _restore_auth_session(client: Client) -> Optional[dict]:
         return None
 
 
+def _email_suffix(email: str) -> str:
+    parts = (email or "").strip().lower().split("@", 1)
+    if len(parts) != 2:
+        return ""
+    return parts[1]
+
+
 def require_authenticated_user() -> dict:
     if not SUPABASE_URL or not SUPABASE_KEY:
         st.error("Supabase configuration missing. Set SUPABASE_URL and SUPABASE_KEY.")
         st.stop()
+
+    client = get_supabase_client()
 
     if "auth_user" in st.session_state:
         return st.session_state["auth_user"]
@@ -212,7 +221,6 @@ def require_authenticated_user() -> dict:
     qp = st.query_params
     if "token" in qp or "token_hash" in qp:
         try:
-            client = get_supabase_client()
             otp_type = qp.get("type", "magiclink")
             params = {"type": otp_type}
             if "token_hash" in qp:
@@ -236,7 +244,9 @@ def require_authenticated_user() -> dict:
     st.title("Sign in")
     st.caption("Coaches sign in with email and password. Clients receive a login email.")
 
-    tab_coach, tab_client = st.tabs(["Coach sign in", "Client login email"])
+    tab_coach, tab_client, tab_create = st.tabs(
+        ["Coach sign in", "Client login email", "Create account"]
+    )
 
     with tab_coach:
         with st.form("sign_in_form", clear_on_submit=False):
@@ -272,6 +282,26 @@ def require_authenticated_user() -> dict:
                 except Exception as exc:
                     st.error(f"Email sign in failed: {exc}")
 
+    with tab_create:
+        with st.form("create_account_form", clear_on_submit=False):
+            email = st.text_input("Work email", key="create_account_email")
+            password = st.text_input("Password", type="password", key="create_account_password")
+            submitted = st.form_submit_button("Create account")
+        if submitted:
+            if not email.strip() or not password:
+                st.error("Enter an email and password to create an account.")
+            else:
+                try:
+                    response = client.auth.sign_up(
+                        {"email": email.strip(), "password": password}
+                    )
+                    if response.session:
+                        _store_auth_state(response)
+                        st.rerun()
+                    st.success("Account created. Check your email to confirm if prompted.")
+                except Exception as exc:
+                    st.error(f"Account creation failed: {exc}")
+
     st.stop()
 
 
@@ -286,6 +316,15 @@ user_id = auth_user["id"]
 user_email = auth_user.get("email") or "Unknown"
 
 role = db.get_user_role(user_id)
+if not role and user_email:
+    email_suffix = _email_suffix(user_email)
+    if email_suffix:
+        existing_owner = db.get_owner_for_email_suffix(email_suffix)
+        if existing_owner is None or existing_owner == user_id:
+            db.register_owner_email_suffix(user_id, email_suffix)
+            db.upsert_user_role(user_id, "super_admin")
+            role = "super_admin"
+
 if role not in ["client", "coach"] and user_email:
     claimed_patient = db.claim_client_invite(user_email, user_id)
     if claimed_patient is not None:
@@ -346,8 +385,10 @@ else:
                 st.sidebar.error("Enter the client email.")
             else:
                 try:
-                    pid = db.upsert_patient(new_name.strip())
-                    db.assign_patient_to_coach(user_id, pid)
+                    owner_id = user_id if role == "super_admin" else None
+                    pid = db.upsert_patient(new_name.strip(), owner_user_id=owner_id)
+                    if role != "super_admin":
+                        db.assign_patient_to_coach(user_id, pid)
                     db.create_client_invite(new_email.strip(), pid, user_id)
                     client = get_supabase_client()
                     options = {}
