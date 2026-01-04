@@ -130,11 +130,30 @@ def init_db() -> None:
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS organization_coaches (
+        owner_user_id TEXT NOT NULL,
+        coach_user_id TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (owner_user_id, coach_user_id)
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS coach_patient_access (
         coach_user_id TEXT NOT NULL,
         patient_id INTEGER NOT NULL,
         created_at TEXT DEFAULT (datetime('now')),
         PRIMARY KEY (coach_user_id, patient_id),
+        FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS client_invites (
+        email TEXT PRIMARY KEY,
+        patient_id INTEGER NOT NULL,
+        coach_user_id TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
         FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
     )
     """)
@@ -463,6 +482,42 @@ def upsert_user_role(user_id: str, role: str) -> None:
     conn.close()
 
 
+def add_coach_to_org(owner_user_id: str, coach_user_id: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO organization_coaches(owner_user_id, coach_user_id)
+        VALUES (?, ?)
+    """, (owner_user_id, coach_user_id))
+    conn.commit()
+    conn.close()
+
+
+def remove_coach_from_org(owner_user_id: str, coach_user_id: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        DELETE FROM organization_coaches
+        WHERE owner_user_id = ? AND coach_user_id = ?
+    """, (owner_user_id, coach_user_id))
+    conn.commit()
+    conn.close()
+
+
+def list_org_coaches(owner_user_id: str) -> List[str]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT coach_user_id
+        FROM organization_coaches
+        WHERE owner_user_id = ?
+        ORDER BY coach_user_id ASC
+    """, (owner_user_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return [str(r[0]) for r in rows]
+
+
 def assign_patient_to_coach(coach_user_id: str, patient_id: int) -> None:
     conn = get_conn()
     cur = conn.cursor()
@@ -474,16 +529,98 @@ def assign_patient_to_coach(coach_user_id: str, patient_id: int) -> None:
     conn.close()
 
 
+def set_patient_owner(patient_id: int, owner_user_id: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE patients
+        SET owner_user_id = ?
+        WHERE id = ?
+    """, (owner_user_id, int(patient_id)))
+    conn.commit()
+    conn.close()
+
+
+def create_client_invite(email: str, patient_id: int, coach_user_id: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO client_invites(email, patient_id, coach_user_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+            patient_id=excluded.patient_id,
+            coach_user_id=excluded.coach_user_id,
+            created_at=datetime('now')
+    """, (email.lower(), int(patient_id), coach_user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_client_invite(email: str) -> Optional[Tuple[int, str]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT patient_id, coach_user_id
+        FROM client_invites
+        WHERE email = ?
+        LIMIT 1
+    """, (email.lower(),))
+    row = cur.fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return int(row[0]), str(row[1])
+
+
+def claim_client_invite(email: str, user_id: str) -> Optional[int]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT patient_id, coach_user_id
+        FROM client_invites
+        WHERE email = ?
+        LIMIT 1
+    """, (email.lower(),))
+    row = cur.fetchone()
+    if row is None:
+        conn.close()
+        return None
+    patient_id, coach_user_id = int(row[0]), str(row[1])
+    cur.execute("""
+        UPDATE patients
+        SET owner_user_id = ?
+        WHERE id = ? AND owner_user_id IS NULL
+    """, (user_id, patient_id))
+    cur.execute("""
+        INSERT OR IGNORE INTO coach_patient_access(coach_user_id, patient_id)
+        VALUES (?, ?)
+    """, (coach_user_id, patient_id))
+    cur.execute("DELETE FROM client_invites WHERE email = ?", (email.lower(),))
+    conn.commit()
+    conn.close()
+    return patient_id
+
+
 def list_patients_for_user(user_id: str, role: str) -> List[Tuple[int, str]]:
     conn = get_conn()
     cur = conn.cursor()
     if role == "coach":
         cur.execute("""
-            SELECT p.id, p.name
+            SELECT DISTINCT p.id, p.name
             FROM patients p
-            JOIN coach_patient_access cpa ON cpa.patient_id = p.id
-            WHERE cpa.coach_user_id = ?
+            LEFT JOIN coach_patient_access cpa
+                ON cpa.patient_id = p.id AND cpa.coach_user_id = ?
+            LEFT JOIN organization_coaches oc
+                ON oc.owner_user_id = p.owner_user_id AND oc.coach_user_id = ?
+            WHERE cpa.coach_user_id IS NOT NULL OR oc.coach_user_id IS NOT NULL
             ORDER BY p.name ASC
+        """, (user_id, user_id))
+    elif role == "super_admin":
+        cur.execute("""
+            SELECT id, name
+            FROM patients
+            WHERE owner_user_id = ?
+            ORDER BY name ASC
         """, (user_id,))
     elif role == "client":
         cur.execute("""
@@ -504,10 +641,23 @@ def _user_can_access_patient(cur: sqlite3.Cursor, user_id: str, role: str, patie
     if role == "coach":
         cur.execute("""
             SELECT 1
-            FROM coach_patient_access
-            WHERE coach_user_id = ? AND patient_id = ?
+            FROM patients p
+            LEFT JOIN coach_patient_access cpa
+                ON cpa.patient_id = p.id AND cpa.coach_user_id = ?
+            LEFT JOIN organization_coaches oc
+                ON oc.owner_user_id = p.owner_user_id AND oc.coach_user_id = ?
+            WHERE p.id = ?
+              AND (cpa.coach_user_id IS NOT NULL OR oc.coach_user_id IS NOT NULL)
             LIMIT 1
-        """, (user_id, int(patient_id)))
+        """, (user_id, user_id, int(patient_id)))
+        return cur.fetchone() is not None
+    if role == "super_admin":
+        cur.execute("""
+            SELECT 1
+            FROM patients
+            WHERE id = ? AND owner_user_id = ?
+            LIMIT 1
+        """, (int(patient_id), user_id))
         return cur.fetchone() is not None
     if role == "client":
         cur.execute("""
@@ -530,7 +680,7 @@ def _assert_patient_access(user_id: str, role: str, patient_id: int) -> None:
 
 
 def _assert_coach(role: str) -> None:
-    if role != "coach":
+    if role not in ["coach", "super_admin"]:
         raise PermissionError("User does not have coach permissions.")
 
 
