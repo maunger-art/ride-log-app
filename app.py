@@ -6,6 +6,18 @@ st.set_page_config(
     layout="wide",
 )
 
+# -----------------------------
+# Supabase init (GLOBAL)
+# -----------------------------
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+
+if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+    st.error("Supabase environment variables are not set.")
+    st.stop()
+
+supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
 st.sidebar.image("assets/technique_logo_full.png", use_column_width=True)
 
 import pandas as pd
