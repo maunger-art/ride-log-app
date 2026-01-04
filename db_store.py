@@ -645,7 +645,7 @@ def claim_client_invite(email: str, user_id: str) -> Optional[int]:
 def list_patients_for_user(user_id: str, role: str) -> List[Tuple[int, str]]:
     conn = get_conn()
     cur = conn.cursor()
-    if role in {"coach", "client"}:
+    if role == "coach":
         cur.execute("""
             SELECT DISTINCT p.id, p.name
             FROM patients p
@@ -656,14 +656,14 @@ def list_patients_for_user(user_id: str, role: str) -> List[Tuple[int, str]]:
             WHERE cpa.coach_user_id IS NOT NULL OR oc.coach_user_id IS NOT NULL
             ORDER BY p.name ASC
         """, (user_id, user_id))
-    elif role == "super_admin":
+    elif role == "client":
         cur.execute("""
             SELECT id, name
             FROM patients
             WHERE owner_user_id = ?
             ORDER BY name ASC
         """, (user_id,))
-    elif role == "client":
+    elif role == "super_admin":
         cur.execute("""
             SELECT id, name
             FROM patients
