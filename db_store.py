@@ -681,6 +681,14 @@ def list_patients_for_user(user_id: str, role: str) -> List[Tuple[int, str]]:
 def _user_can_access_patient(cur: sqlite3.Cursor, user_id: str, role: str, patient_id: int) -> bool:
     if role not in {"coach", "client", "super_admin"}:
         return False
+    if role == "super_admin":
+        cur.execute("""
+            SELECT 1
+            FROM patients
+            WHERE id = ? AND owner_user_id = ?
+            LIMIT 1
+        """, (int(patient_id), user_id))
+        return cur.fetchone() is not None
     cur.execute("""
         SELECT 1
         FROM coach_patient_access
