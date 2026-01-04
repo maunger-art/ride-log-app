@@ -2,11 +2,13 @@
 
 ## Authentication
 - Supabase Auth
-- Users authenticate via email/password
+- Coaches authenticate via email/password
+- Clients authenticate via email login link (magic link)
 - Supabase user ID is mapped to internal roles
 
 ## Roles
 ### Client
+- Accounts are created by coaches, who trigger an email login link
 - Can log rides
 - Can connect own Strava account
 - Can view plans and S&C targets
@@ -22,4 +24,3 @@
 ## Access Control
 - Enforced both in UI and database layer
 - All patient access validated via role mapping
-
